@@ -158,8 +158,7 @@ module GraphQL
           exec_field = parent_field #: ExecutionField[untyped]?
           while exec_field
             if exec_field.scope.aborted?
-              abort!
-              return true
+              return abort!
             end
             exec_field = exec_field.scope.parent_field
           end

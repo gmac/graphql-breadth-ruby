@@ -3,6 +3,7 @@
 
 require_relative "./executor/has_attributes"
 require_relative "./executor/lazy_element"
+require_relative "./executor/lazy_async"
 require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
 require_relative "./executor/execution_directive"
@@ -22,6 +23,8 @@ module GraphQL
       EMPTY_OBJECT = {}.freeze
       UNDEFINED = Util::NilLike.new("undefined")
       EMPTY_TIMER = 0.0
+
+      include LazyAsync
 
       #: GraphQL::Query
       attr_reader :query
@@ -454,57 +457,82 @@ module GraphQL
 
       #: (Array[LazyElement]) -> void
       def execute_lazy(lazy_elements)
-        aborted_status_cache = Hash.new { |h, exec_scope| h[exec_scope] = exec_scope.aborted_subtree? }.compare_by_identity
-        pending_loaders = (@loader_cache || EMPTY_OBJECT).each_value.reject { _1.promised.empty? }
+        pending_loaders = 0
+        sync_batches = nil #: Array[LazyLoader::Batch]?
+        async_batches = nil #: Array[LazyLoader::Batch]?
 
-        if pending_loaders.empty?
+        (@loader_cache || EMPTY_OBJECT).each_value do |loader|
+          next if loader.promised.empty?
+
+          pending_loaders += 1
+          batch = loader.to_batch
+
+          if batch.aborted?
+            loader.reset!
+          elsif batch.loader.async_settings.enabled?
+            (async_batches ||= []) << batch
+          else
+            (sync_batches ||= []) << batch
+          end
+        end
+
+        if pending_loaders.zero?
           raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
         end
 
-        pending_loaders.each do |loader|
-          loader_elements = loader.promised.map(&:element)
-          all_aborted = loader_elements.all? do |element|
-            aborted_status_cache[element.is_a?(ExecutionField) ? element.scope : element]
+        sync_batches ||= EMPTY_ARRAY
+
+        if async_batches
+          execute_async_lazy_batches(sync_batches, async_batches)
+        else
+          sync_batches.each { execute_lazy_batch(_1) }
+          resume_lazy_elements(lazy_elements)
+        end
+      end
+
+      #: (LazyLoader::Batch, ?async_context: LazyAsync::LoaderContext?) -> void
+      def execute_lazy_batch(batch, async_context: nil)
+        loader = batch.loader
+        lazy_start_time = EMPTY_TIMER
+
+        begin
+          unless @tracers.empty?
+            lazy_start_time = timer
+            @tracers.each { _1.before_lazy_set(loader, batch.elements, @context) }
           end
 
-          if all_aborted
-            loader.reset!
-            next
-          end
-
-          lazy_start_time = EMPTY_TIMER
-          begin
-            unless @tracers.empty?
-              lazy_start_time = timer
-              @tracers.each { _1.before_lazy_set(loader, loader_elements, @context) }
-            end
-            loader.execute!(@context)
-          rescue StandardError => e
-            handled_error = handle_or_reraise(e)
-            loader_elements.each do |element|
-              case element
-              when ExecutionField
-                field_error = ExecutionError.from(handled_error, exec_field: element)
-                element.result = element.resolve_all(field_error)
-              when ExecutionScope
-                scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
-                element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
-                element.abort!
-              end
-            end
-          ensure
-            unless @tracers.empty?
-              duration = timer(lazy_start_time)
-              @tracers.each { _1.after_lazy_set(loader, loader_elements, @context, duration:) }
-            end
+          loader.execute!(@context, async_context: async_context)
+        rescue StandardError => e
+          apply_lazy_error(batch, handle_or_reraise(e))
+        ensure
+          unless @tracers.empty?
+            duration = timer(lazy_start_time)
+            @tracers.each { _1.after_lazy_set(loader, batch.elements, @context, duration:) }
           end
         end
+      end
 
-        aborted_status_cache.clear
-        lazy_elements.each do |element|
+      #: (LazyLoader::Batch, ExecutionError) -> void
+      def apply_lazy_error(batch, error)
+        batch.elements.each do |element|
           case element
           when ExecutionField
-            next if aborted_status_cache[element.scope]
+            field_error = ExecutionError.from(error, exec_field: element)
+            element.result = element.resolve_all(field_error)
+          when ExecutionScope
+            scope_error = ExecutionError.from(error, exec_field: element.parent_field)
+            element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
+            element.abort!
+          end
+        end
+      end
+
+      #: (Array[LazyElement]) -> void
+      def resume_lazy_elements(elements)
+        elements.each do |element|
+          case element
+          when ExecutionField
+            next if element.scope.aborted_subtree?
 
             if element.has_result?
               resume_lazy_field_result(element)
@@ -512,7 +540,7 @@ module GraphQL
               resume_lazy_field_execute(element)
             end
           when ExecutionScope
-            next if aborted_status_cache[element]
+            next if element.aborted_subtree?
 
             resume_lazy_scope_execute(element)
           end
@@ -607,8 +635,6 @@ module GraphQL
           return
         end
 
-        parent_objects = exec_field.scope.objects
-
         resolve_start_time = EMPTY_TIMER
         begin
           unless @tracers.empty?
@@ -633,7 +659,7 @@ module GraphQL
         rescue StandardError => e
           error = handle_or_reraise(e, exec_field: exec_field)
           @errors << error if error.base_error?
-          exec_field.result = Array.new(parent_objects.length, error)
+          exec_field.result = Array.new(exec_field.objects.length, error)
         ensure
           unless @tracers.empty?
             duration = timer(resolve_start_time)
@@ -772,8 +798,7 @@ module GraphQL
           val.map { build_leaf_result(exec_field, current_type.of_type, _1) }
         else
           begin
-            unwrapped_type = current_type.unwrap
-            coerced_val = unwrapped_type.coerce_result(val, @context)
+            coerced_val = current_type.unwrap.coerce_result(val, @context)
             return coerced_val unless coerced_val.nil?
 
             build_missing_value(exec_field, current_type, nil)
@@ -832,7 +857,7 @@ module GraphQL
         current_exec_field = exec_field #: ExecutionField[untyped]?
         propagating = !!exec_field.propagates_null?
         highest_nulled_depth = exec_field.scope.depth
-        highest_list_depth = Integer(-1)
+        highest_list_depth = -1
 
         while current_exec_field
           if current_exec_field.propagates_null? && propagating
@@ -842,7 +867,7 @@ module GraphQL
           end
 
           if current_exec_field.type.list?
-            highest_list_depth = Integer(current_exec_field.scope.depth)
+            highest_list_depth = current_exec_field.scope.depth
           end
 
           current_exec_field = current_exec_field.scope.parent_field
