@@ -45,6 +45,11 @@ module GraphQL
           @deferred_scopes.any?
         end
 
+        #: -> bool
+        def has_next?
+          @deferred_scopes.any? { _1.announced? && !_1.executed? }
+        end
+
         #: -> Array[DeferredDelivery]
         def prepare_pending
           @deferred_scopes.each do |deferred_scope|
@@ -94,6 +99,7 @@ module GraphQL
         def completed_payloads(deliveries, errors_by_delivery: EMPTY_OBJECT)
           deliveries.uniq.filter_map do |delivery|
             next if @completed_deliveries[delivery]
+            next unless delivery_finished?(delivery)
 
             @completed_deliveries[delivery] = true
             @publisher.completed(delivery, errors: errors_by_delivery[delivery] || EMPTY_ARRAY)
@@ -146,6 +152,23 @@ module GraphQL
           deliveries
             .select { _1.path_prefix_of?(path) }
             .max_by { _1.path.length }
+        end
+
+        #: (DeferredDelivery) -> bool
+        def delivery_finished?(delivery)
+          defer_usage = defer_usage_for_delivery(delivery)
+          return true unless defer_usage
+
+          @deferred_scopes.none? { !_1.executed? && _1.defer_usages.include?(defer_usage) }
+        end
+
+        #: (DeferredDelivery) -> DeferUsage?
+        def defer_usage_for_delivery(delivery)
+          @deliveries_by_usage.each do |defer_usage, deliveries|
+            return defer_usage if deliveries.include?(delivery)
+          end
+
+          nil
         end
 
         # True when the formatted initial result null-bubbled away the object at `path`

@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>graphql-breadth example</title>
+    <link rel="stylesheet" href="https://unpkg.com/graphiql@2.4.7/graphiql.min.css">
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        background: #f7f8fa;
+      }
+
+      .top-nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        min-width: 0;
+        min-height: 48px;
+        padding: 0 14px;
+        border-bottom: 1px solid #d6d8dc;
+        background: #ffffff;
+        color: #20242a;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .top-nav-brand {
+        flex: 0 0 auto;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .top-nav-links {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        overflow-x: auto;
+      }
+
+      .top-nav-actions {
+        display: flex;
+        align-items: center;
+        flex: 0 0 auto;
+        margin-left: auto;
+      }
+
+      .top-nav-link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 32px;
+        padding: 0 10px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        color: #3d4550;
+        font-size: 13px;
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      .top-nav-link:hover {
+        background: #f0f2f5;
+      }
+
+      .top-nav-link-active {
+        border-color: #b9c0ca;
+        background: #eef1f5;
+        color: #171a1f;
+      }
+
+      .event-button {
+        display: inline-flex;
+        align-items: center;
+        min-height: 32px;
+        padding: 0 11px;
+        border: 1px solid #9ea8b5;
+        border-radius: 6px;
+        background: #20242a;
+        color: #ffffff;
+        cursor: pointer;
+        font: 600 13px/1 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        white-space: nowrap;
+      }
+
+      .event-button:hover {
+        background: #343a42;
+      }
+
+      .event-button:disabled {
+        cursor: default;
+        opacity: 0.66;
+      }
+
+      #app {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .example-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+        height: 100%;
+        min-width: 0;
+      }
+
+      .example-shell-full {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .graphiql-host {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .delivery-panel {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-width: 0;
+        min-height: 0;
+        border-left: 1px solid #d6d8dc;
+        background: #f7f8fa;
+        color: #20242a;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .delivery-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 42px;
+        padding: 0 12px;
+        border-bottom: 1px solid #d6d8dc;
+        background: #eef1f5;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .delivery-status {
+        font-size: 12px;
+        font-weight: 500;
+        color: #5f6875;
+      }
+
+      .event-feed {
+        min-height: 0;
+        overflow: auto;
+        background: #ffffff;
+      }
+
+      .event-feed-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100%;
+        padding: 24px;
+        color: #78818d;
+        font-size: 13px;
+        text-align: center;
+      }
+
+      .event-entry {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        min-height: 0;
+        border-bottom: 1px solid #d6d8dc;
+      }
+
+      .event-entry:last-child {
+        border-bottom: 0;
+      }
+
+      .event-entry-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        color: #5f6875;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .event-entry-output {
+        margin: 0;
+        min-width: 0;
+        overflow: auto;
+        max-height: 280px;
+        padding: 10px;
+        border: 1px solid #e2e4e8;
+        border-radius: 6px;
+        background: #f7f8fa;
+        color: #20242a;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      @media (max-width: 900px) {
+        .top-nav {
+          gap: 10px;
+          padding: 0 10px;
+        }
+
+        .top-nav-brand {
+          display: none;
+        }
+
+        .example-shell {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 62vh) minmax(260px, 38vh);
+        }
+
+        .example-shell-full {
+          grid-template-rows: minmax(0, 1fr);
+        }
+
+        .delivery-panel {
+          border-left: 0;
+          border-top: 1px solid #d6d8dc;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="top-nav" aria-label="Example modes">
+      <div class="top-nav-brand">graphql-breadth</div>
+      <div class="top-nav-links">
+        <% nav_items.each do |item| %>
+          <a
+            class="top-nav-link<%= item.fetch("id") == current_mode ? " top-nav-link-active" : "" %>"
+            href="<%= item.fetch("path") %>"
+          ><%= item.fetch("label") %></a>
+        <% end %>
+      </div>
+      <% if mode_config["trigger"] %>
+        <div class="top-nav-actions">
+          <button class="event-button" id="trigger-event-button" type="button">
+            <%= mode_config.fetch("trigger").fetch("label") %>
+          </button>
+        </div>
+      <% end %>
+    </nav>
+    <div id="app"></div>
+    <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/graphiql@2.4.7/graphiql.min.js"></script>
+    <script>
+      const modeConfig = <%= JSON.generate(mode_config) %>;
+      const inspectorConfig = modeConfig.inspector;
+
+      function ExamplePage() {
+        const defaultVariables = React.useMemo(() => (
+          JSON.stringify(modeConfig.variables || {}, null, 2)
+        ), []);
+        const graphiqlStorage = React.useMemo(() => createGraphiQLStorage({
+          editorFlex: inspectorConfig ? "hide-second" : "1",
+        }), []);
+        const [query, setQuery] = React.useState(modeConfig.defaultQuery);
+        const [variables, setVariables] = React.useState(defaultVariables);
+        const [streamEvents, setStreamEvents] = React.useState([]);
+        const [status, setStatus] = React.useState("idle");
+        const startedAt = React.useRef(null);
+
+        React.useEffect(() => {
+          if (!modeConfig.trigger) return undefined;
+
+          const button = document.getElementById("trigger-event-button");
+          if (!button) return undefined;
+
+          const originalLabel = button.textContent.trim();
+          let resetTimer = null;
+
+          async function triggerEvent() {
+            window.clearTimeout(resetTimer);
+            button.disabled = true;
+            button.textContent = "Sending";
+
+            try {
+              const response = await fetch(modeConfig.trigger.path, {
+                method: "post",
+                headers: {
+                  "Accept": "application/json",
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ name: "SSE" }),
+              });
+              const payload = await response.json();
+              if (!response.ok) throw new Error(payload.errors?.[0]?.message || "Request failed");
+
+              button.textContent = `Sent #${payload.event.sequence}`;
+            } catch (error) {
+              button.textContent = "Error";
+            } finally {
+              resetTimer = window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 900);
+            }
+          }
+
+          button.addEventListener("click", triggerEvent);
+
+          return () => {
+            window.clearTimeout(resetTimer);
+            button.removeEventListener("click", triggerEvent);
+          };
+        }, []);
+
+        const graphQLFetcher = React.useCallback((graphQLParams, fetcherOptions = {}) => {
+          startedAt.current = performance.now();
+          setStreamEvents([]);
+          setStatus("running");
+
+          const appendStreamEvent = (payload) => {
+            const receivedAt = formatElapsed(performance.now() - startedAt.current);
+            setStreamEvents((events) => events.concat([{
+              number: events.length + 1,
+              receivedAt,
+              payload,
+            }]));
+          };
+
+          const callbacks = {
+            onInitial(payload) {
+              appendStreamEvent(payload);
+            },
+            onIncremental(payload) {
+              appendStreamEvent(payload);
+            },
+            onComplete() {
+              setStatus("complete");
+            },
+            onError() {
+              setStatus("error");
+            },
+          };
+
+          if (modeConfig.transport === "sse") {
+            return streamGraphQL(graphQLParams, fetcherOptions.headers, callbacks);
+          }
+
+          return fetchGraphQL(graphQLParams, fetcherOptions.headers, callbacks);
+        }, []);
+
+        const shellClassName = "example-shell" + (
+          inspectorConfig ? " example-shell-stream" : " example-shell-full"
+        );
+
+        return React.createElement("div", {
+          className: shellClassName,
+        },
+          React.createElement("div", { className: "graphiql-host" },
+            React.createElement(GraphiQL, {
+              key: modeConfig.path,
+              fetcher: graphQLFetcher,
+              query,
+              variables,
+              onEditQuery: setQuery,
+              onEditVariables: setVariables,
+              defaultEditorToolsVisibility: inspectorConfig ? false : undefined,
+              storage: graphiqlStorage,
+            })
+          ),
+          inspectorConfig && React.createElement(DeliveryPanel, {
+            events: streamEvents,
+            status,
+          })
+        );
+      }
+
+      function createGraphiQLStorage(defaults) {
+        const store = new Map();
+
+        for (const [key, value] of Object.entries(defaults || {})) {
+          store.set(`graphiql:${key}`, value);
+        }
+
+        return {
+          get length() {
+            return store.size;
+          },
+          getItem(key) {
+            return store.has(key) ? store.get(key) : null;
+          },
+          setItem(key, value) {
+            store.set(key, String(value));
+          },
+          removeItem(key) {
+            store.delete(key);
+          },
+          clear() {
+            store.clear();
+          },
+        };
+      }
+
+      function DeliveryPanel({ events, status }) {
+        const feedRef = React.useRef(null);
+
+        React.useEffect(() => {
+          if (!feedRef.current) return;
+          feedRef.current.scrollTop = feedRef.current.scrollHeight;
+        }, [events.length]);
+
+        return React.createElement("aside", { className: "delivery-panel" },
+          React.createElement("div", { className: "delivery-header" },
+            React.createElement("span", null, inspectorConfig.title),
+            React.createElement("span", { className: "delivery-status" }, status)
+          ),
+          React.createElement("div", { className: "event-feed", ref: feedRef },
+            events.length
+              ? events.map((event) => React.createElement("article", {
+                  className: "event-entry",
+                  key: event.number,
+                },
+                  React.createElement("div", { className: "event-entry-meta" },
+                    React.createElement("span", null, `Event #${event.number}`),
+                    React.createElement("span", null, event.receivedAt)
+                  ),
+                  React.createElement("pre", {
+                    className: "event-entry-output",
+                  }, JSON.stringify(event.payload, null, 2))
+                ))
+              : React.createElement("div", {
+                  className: "event-feed-empty",
+                }, inspectorConfig.empty)
+          )
+        );
+      }
+
+      async function fetchGraphQL(graphQLParams, extraHeaders, callbacks = {}) {
+        try {
+          const response = await fetch("/graphql", {
+            method: "post",
+            headers: {
+              ...normalizeHeaders(extraHeaders),
+              "Accept": "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(graphQLParams),
+          });
+          const payload = await response.json();
+          callbacks.onInitial?.(payload);
+          callbacks.onComplete?.();
+          return payload;
+        } catch (error) {
+          callbacks.onError?.(error);
+          throw error;
+        }
+      }
+
+      async function* streamGraphQL(graphQLParams, extraHeaders, callbacks = {}) {
+        const controller = new AbortController();
+        const pendingById = new Map();
+        let mergedResult = null;
+        let hasRecordedInitialPayload = false;
+        const response = await fetch("/graphql", {
+          method: "post",
+          headers: {
+            ...normalizeHeaders(extraHeaders),
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(graphQLParams),
+          signal: controller.signal,
+        });
+
+        try {
+          const contentType = response.headers.get("content-type") || "";
+
+          if (!contentType.includes("text/event-stream")) {
+            const payload = await response.json();
+            callbacks.onInitial?.(payload);
+            callbacks.onComplete?.();
+            yield payload;
+            return;
+          }
+
+          for await (const payload of parseEventStream(response.body)) {
+            recordPayload(payload, callbacks, hasRecordedInitialPayload);
+            mergedResult = mergePayload(mergedResult, payload, pendingById);
+            hasRecordedInitialPayload = true;
+            yield mergedResult;
+          }
+
+          callbacks.onComplete?.();
+        } catch (error) {
+          callbacks.onError?.(error);
+          throw error;
+        } finally {
+          controller.abort();
+        }
+      }
+
+      async function* parseEventStream(stream) {
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        try {
+          while (true) {
+            const read = await reader.read();
+            buffer += read.done ? decoder.decode() : decoder.decode(read.value, { stream: true });
+
+            let separator = buffer.match(/\r?\n\r?\n/);
+            while (separator) {
+              const rawEvent = buffer.slice(0, separator.index);
+              buffer = buffer.slice(separator.index + separator[0].length);
+
+              const event = parseEvent(rawEvent);
+              if (event.name === "complete") return;
+              if (event.data) yield JSON.parse(event.data);
+
+              separator = buffer.match(/\r?\n\r?\n/);
+            }
+
+            if (read.done) return;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      }
+
+      function parseEvent(rawEvent) {
+        const event = { name: "message", data: "" };
+        const data = [];
+
+        for (const line of rawEvent.split(/\r?\n/)) {
+          if (!line || line.startsWith(":")) continue;
+
+          const colon = line.indexOf(":");
+          const field = colon === -1 ? line : line.slice(0, colon);
+          let value = colon === -1 ? "" : line.slice(colon + 1);
+          if (value.startsWith(" ")) value = value.slice(1);
+
+          if (field === "event") event.name = value;
+          if (field === "data") data.push(value);
+        }
+
+        event.data = data.join("\n");
+        return event;
+      }
+
+      function recordPayload(payload, callbacks, hasRecordedInitialPayload) {
+        if (!hasRecordedInitialPayload) {
+          callbacks.onInitial?.(payload);
+          return;
+        }
+
+        callbacks.onIncremental?.(payload);
+      }
+
+      function mergePayload(currentResult, payload, pendingById) {
+        if (Array.isArray(payload.pending)) {
+          for (const pending of payload.pending) {
+            pendingById.set(pending.id, pending);
+          }
+        }
+
+        const nextResult = clone(currentResult || {});
+
+        if (!Array.isArray(payload.incremental)) {
+          if ("data" in payload) nextResult.data = clone(payload.data);
+          if (payload.errors) nextResult.errors = clone(payload.errors);
+          return compactPayload(nextResult);
+        }
+
+        for (const incremental of payload.incremental) {
+          const pending = pendingById.get(incremental.id);
+          const basePath = pending ? pending.path : incremental.path;
+          const path = Array.isArray(basePath)
+            ? basePath.concat(incremental.subPath || [])
+            : [];
+
+          if ("data" in incremental) {
+            nextResult.data = applyDataPatch(nextResult.data, path, incremental.data);
+          }
+
+          if (incremental.errors) {
+            nextResult.errors = (nextResult.errors || []).concat(clone(incremental.errors));
+          }
+        }
+
+        if (Array.isArray(payload.completed)) {
+          for (const completed of payload.completed) {
+            pendingById.delete(completed.id);
+          }
+        }
+
+        return compactPayload(nextResult);
+      }
+
+      function applyDataPatch(data, path, patchData) {
+        if (!Array.isArray(path) || path.length === 0) {
+          return mergeValues(data, patchData);
+        }
+
+        const nextData = clone(data || (typeof path[0] === "number" ? [] : {}));
+        let target = nextData;
+
+        for (let index = 0; index < path.length - 1; index += 1) {
+          const segment = path[index];
+          const nextSegment = path[index + 1];
+          if (target[segment] === null || typeof target[segment] !== "object") {
+            target[segment] = typeof nextSegment === "number" ? [] : {};
+          }
+          target = target[segment];
+        }
+
+        const finalSegment = path[path.length - 1];
+        target[finalSegment] = mergeValues(target[finalSegment], patchData);
+        return nextData;
+      }
+
+      function mergeValues(existing, incoming) {
+        if (isPlainObject(existing) && isPlainObject(incoming)) {
+          const merged = { ...existing };
+          for (const [key, value] of Object.entries(incoming)) {
+            merged[key] = mergeValues(merged[key], value);
+          }
+          return merged;
+        }
+
+        return clone(incoming);
+      }
+
+      function isPlainObject(value) {
+        return value !== null && typeof value === "object" && !Array.isArray(value);
+      }
+
+      function clone(value) {
+        return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+      }
+
+      function compactPayload(payload) {
+        const compact = {};
+        for (const [key, value] of Object.entries(payload)) {
+          if (value !== undefined) compact[key] = value;
+        }
+
+        return compact;
+      }
+
+      function normalizeHeaders(extraHeaders) {
+        if (!extraHeaders) return {};
+        if (extraHeaders instanceof Headers) return Object.fromEntries(extraHeaders.entries());
+        return extraHeaders;
+      }
+
+      function formatElapsed(milliseconds) {
+        return `+${(milliseconds / 1000).toFixed(2)}s`;
+      }
+
+      ReactDOM.render(
+        React.createElement(ExamplePage),
+        document.getElementById("app")
+      );
+    </script>
+  </body>
+</html>
