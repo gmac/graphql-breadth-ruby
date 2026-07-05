@@ -22,6 +22,9 @@ module GraphQL
           #: Set[LazyElement]
           attr_reader :waiting_elements
 
+          #: Exception?
+          attr_accessor :exception
+
           #: Hash[Symbol, ::Async::Semaphore]
           attr_reader :semaphores_by_resource
 
@@ -201,6 +204,10 @@ module GraphQL
                 batch = async_context.completed_batches.dequeue
                 async_context.active_loaders.delete(batch.loader)
 
+                if (ex = async_context.exception)
+                  raise ex
+                end
+
                 resume_lazy_elements_and_drain_requeued(async_context, batch.elements)
                 retry_waiting_lazy_elements(async_context)
               end
@@ -222,18 +229,24 @@ module GraphQL
             loader_context = LoaderContext.new(batch.loader, async_context, async_task)
 
             begin
-              if settings.timeout
-                async_task.with_timeout(settings.timeout) do
+              begin
+                if settings.timeout
+                  async_task.with_timeout(settings.timeout) do
+                    loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
+                  end
+                else
                   loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
                 end
-              else
-                loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
+              rescue StandardError => e
+                apply_lazy_error(batch, handle_or_reraise(e))
               end
-            rescue StandardError => e
-              apply_lazy_error(batch, handle_or_reraise(e))
+            rescue Exception => ex
+              # don't let async task failures strand the scheduler
+              # mark the batch complete, then re-raise in the executor path
+              async_context.exception ||= ex
+            ensure
+              async_context.completed_batches << batch
             end
-
-            async_context.completed_batches << batch
           end
         end
 
@@ -251,11 +264,8 @@ module GraphQL
           return unless @lazy_queue.length > queue_start
 
           requeued_elements = @lazy_queue.slice!(queue_start, @lazy_queue.length - queue_start) #: as !nil
-          scheduled_elements = schedule_pending_lazy_batches(async_context)
-
-          if scheduled_elements.empty? && async_context.active_loaders.empty?
-            raise ImplementationError, "Lazy #{requeued_elements.first} produced a promise without a loader"
-          end
+          requeued_element = requeued_elements.first #: as !nil
+          scheduled_elements = schedule_pending_lazy_batches(async_context, requeued_element)
 
           requeued_elements.each do |element|
             next if scheduled_elements.include?(element)
@@ -264,8 +274,9 @@ module GraphQL
           end
         end
 
-        #: (ExecutorContext) -> Set[LazyElement]
-        def schedule_pending_lazy_batches(async_context)
+        #: (ExecutorContext, LazyElement) -> Set[LazyElement]
+        def schedule_pending_lazy_batches(async_context, requeued_element)
+          pending_loader_count = 0
           sync_pending_batches = nil #: Array[LazyLoader::Batch]?
           async_pending_batches = nil #: Array[LazyLoader::Batch]?
           scheduled_elements = nil #: Set[LazyElement]?
@@ -273,6 +284,7 @@ module GraphQL
           (@loader_cache || EMPTY_OBJECT).each_value do |loader|
             next if loader.promised.empty? || async_context.active_loaders.include?(loader)
 
+            pending_loader_count += 1
             batch = loader.to_batch
             if batch.aborted?
               loader.reset!
@@ -285,6 +297,14 @@ module GraphQL
                 (sync_pending_batches ||= []) << batch
               end
             end
+          end
+
+          if pending_loader_count.zero?
+            if async_context.active_loaders.empty?
+              raise ImplementationError, "Lazy #{requeued_element} produced a promise without a loader"
+            end
+
+            return EMPTY_SET
           end
 
           return EMPTY_SET if scheduled_elements.nil?
