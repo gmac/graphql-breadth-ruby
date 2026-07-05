@@ -457,14 +457,14 @@ module GraphQL
 
       #: (Array[LazyElement]) -> void
       def execute_lazy(lazy_elements)
-        pending_loaders = 0
+        pending_loader_count = 0
         sync_batches = nil #: Array[LazyLoader::Batch]?
         async_batches = nil #: Array[LazyLoader::Batch]?
 
         (@loader_cache || EMPTY_OBJECT).each_value do |loader|
           next if loader.promised.empty?
 
-          pending_loaders += 1
+          pending_loader_count += 1
           batch = loader.to_batch
 
           if batch.aborted?
@@ -476,7 +476,7 @@ module GraphQL
           end
         end
 
-        if pending_loaders.zero?
+        if pending_loader_count.zero?
           raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
         end
 

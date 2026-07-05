@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "timeout"
 
 class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
@@ -50,10 +51,10 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     end
 
     def perform_map(keys, _ctx)
-      self.class.events << [:start, @group, keys.dup]
+      self.class.events << [:start, @group]
       self.class.active += 1
       self.class.max_active = [self.class.max_active, self.class.active].max
-      sleep 0.01
+      sleep(@group == "a" ? 0.02 : 0.001)
       keys.map { |key| "#{key}-#{@group}" }
     ensure
       self.class.events << [:finish, @group]
@@ -66,7 +67,7 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     reset_tracking!
   end
 
-  class BoomConcurrentLoader < GraphQL::Breadth::LazyLoader
+  class ErrorConcurrentLoader < GraphQL::Breadth::LazyLoader
     async limit: 2
 
     def map?
@@ -126,11 +127,12 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
   class FanoutMapLoader < GraphQL::Breadth::LazyLoader
     class << self
-      attr_accessor :active, :max_active
+      attr_accessor :active, :max_active, :events
 
       def reset_tracking!
         self.active = 0
         self.max_active = 0
+        self.events = []
       end
     end
 
@@ -143,17 +145,19 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     def perform_map(keys, _ctx)
       async_map(keys) do |key|
+        self.class.events << [:start, key]
         self.class.active += 1
         self.class.max_active = [self.class.max_active, self.class.active].max
-        sleep 0.01
+        sleep(key == "Apple" ? 0.02 : 0.001)
         "#{key}-fanout"
       ensure
+        self.class.events << [:finish, key]
         self.class.active -= 1
       end
     end
   end
 
-  class BoomFanoutMapLoader < GraphQL::Breadth::LazyLoader
+  class ErrorFanoutMapLoader < GraphQL::Breadth::LazyLoader
     async limit: 2, resource: :boom_fanout_map_loader
 
     def map?
@@ -172,19 +176,51 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
   class SharedResourceTracker
     class << self
-      attr_accessor :active, :max_active
+      attr_accessor :active, :max_active, :events
 
       def reset_tracking!
         self.active = 0
         self.max_active = 0
+        self.events = []
       end
 
-      def enter
+      def enter(label)
+        events << [:enter, label]
         self.active += 1
         self.max_active = [max_active, active].max
       end
 
-      def leave
+      def leave(label)
+        events << [:leave, label]
+        self.active -= 1
+      end
+    end
+
+    reset_tracking!
+  end
+
+  class AsyncFlowTracker
+    class << self
+      attr_accessor :active, :max_active, :events
+
+      def reset_tracking!
+        self.active = 0
+        self.max_active = 0
+        self.events = []
+      end
+
+      def record(*event)
+        events << event
+      end
+
+      def enter(label)
+        record(:start, label)
+        self.active += 1
+        self.max_active = [max_active, active].max
+      end
+
+      def leave(label)
+        record(:finish, label)
         self.active -= 1
       end
     end
@@ -201,11 +237,12 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     def perform_map(keys, _ctx)
       async_map(keys) do |key|
-        SharedResourceTracker.enter
+        label = [:fanout, key]
+        SharedResourceTracker.enter(label)
         sleep 0.01
         "#{key}-fanout"
       ensure
-        SharedResourceTracker.leave
+        SharedResourceTracker.leave(label)
       end
     end
   end
@@ -218,11 +255,261 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     end
 
     def perform_map(keys, _ctx)
-      SharedResourceTracker.enter
+      label = [:plain, keys.dup]
+      SharedResourceTracker.enter(label)
       sleep 0.01
       keys.map { |key| "#{key}-plain" }
     ensure
-      SharedResourceTracker.leave
+      SharedResourceTracker.leave(label)
+    end
+  end
+
+  class SameResourceFanoutLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1, resource: :same_resource_fanout_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async_map(keys) do |key|
+        label = [:same_resource_fanout, key]
+        AsyncFlowTracker.enter(label)
+        sleep(key == "Apple" ? 0.01 : 0.001)
+        "#{key}-same-resource"
+      ensure
+        AsyncFlowTracker.leave(label)
+      end
+    end
+  end
+
+  class UnlimitedFanoutLoader < GraphQL::Breadth::LazyLoader
+    async limit: nil
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async_map(keys) do |key|
+        label = [:unlimited_fanout, key]
+        AsyncFlowTracker.enter(label)
+        sleep(key == "Apple" ? 0.02 : 0.001)
+        "#{key}-unlimited"
+      ensure
+        AsyncFlowTracker.leave(label)
+      end
+    end
+  end
+
+  class ConflictingLimitOneLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1, resource: :conflicting_async_resource
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      keys.map { "#{_1}-one" }
+    end
+  end
+
+  class ConflictingLimitTwoLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :conflicting_async_resource
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      keys.map { "#{_1}-two" }
+    end
+  end
+
+  class LoaderTimeoutLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1, timeout: 0.001
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      sleep 0.05
+      keys.map { "#{_1}-timeout" }
+    end
+  end
+
+  class ChildTimeoutLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :child_timeout_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async_map(keys, timeout: 0.001) do |key|
+        sleep 0.05
+        "#{key}-child-timeout"
+      end
+    end
+  end
+
+  class MissingAsyncBlockLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async
+      keys
+    end
+  end
+
+  class MissingAsyncMapBlockLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async_map(keys)
+    end
+  end
+
+  class InvalidChildLimitLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async(limit: 0) { keys }
+      keys
+    end
+  end
+
+  class InvalidChildTimeoutLoader < GraphQL::Breadth::LazyLoader
+    async limit: 1
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async(timeout: 0) { keys }
+      keys
+    end
+  end
+
+  class ActiveSkipProducerLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :active_skip_producer_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      AsyncFlowTracker.record(:start, [:active_skip_producer, keys.dup])
+      sleep 0.001
+      keys.map { "#{_1}-fast" }
+    ensure
+      AsyncFlowTracker.record(:finish, [:active_skip_producer, keys.dup])
+    end
+  end
+
+  class ActiveSkipLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :active_skip_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      AsyncFlowTracker.record(:start, [:active_skip, keys.dup])
+      sleep(keys.include?("Banana") ? 0.05 : 0.001)
+      keys.map { "#{_1}-active" }
+    ensure
+      AsyncFlowTracker.record(:finish, [:active_skip, keys.dup])
+    end
+  end
+
+  class DrainFastLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :drain_fast_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      AsyncFlowTracker.record(:start, [:drain_fast, keys.dup])
+      sleep 0.001
+      keys.map { "#{_1}-fast" }
+    ensure
+      AsyncFlowTracker.record(:finish, [:drain_fast, keys.dup])
+    end
+  end
+
+  class DrainSlowLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :drain_slow_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      AsyncFlowTracker.record(:start, [:drain_slow, keys.dup])
+      sleep 0.05
+      keys.map { "#{_1}-slow" }
+    ensure
+      AsyncFlowTracker.record(:finish, [:drain_slow, keys.dup])
+    end
+  end
+
+  class DrainSyncLoader < GraphQL::Breadth::LazyLoader
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      AsyncFlowTracker.record(:sync, [:drain_sync, keys.dup])
+      keys.map { "#{_1}-sync" }
+    end
+  end
+
+  class AbortInitialLoader < GraphQL::Breadth::LazyLoader
+    async limit: 2, resource: :abort_initial_loader
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      keys.map { _1 == "abort" ? nil : "#{_1}-initial" }
+    end
+  end
+
+  class AbortedPendingLoader < GraphQL::Breadth::LazyLoader
+    class << self
+      attr_accessor :performed
+
+      def reset_tracking!
+        self.performed = false
+      end
+    end
+
+    reset_tracking!
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      self.class.performed = true
+      keys.map { "#{_1}-aborted" }
     end
   end
 
@@ -359,17 +646,67 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     end
   end
 
+  class ActiveSkipChainResolver < GraphQL::Breadth::FieldResolver
+    def resolve(exec_field, _ctx)
+      exec_field
+        .lazy(
+          loader_class: ActiveSkipProducerLoader,
+          keys: exec_field.objects.map { _1["first"] },
+        )
+        .then do |values|
+          exec_field.lazy(
+            loader_class: ActiveSkipLoader,
+            keys: values,
+          )
+        end
+    end
+  end
+
+  class DrainSyncChainResolver < GraphQL::Breadth::FieldResolver
+    def resolve(exec_field, _ctx)
+      exec_field
+        .lazy(
+          loader_class: DrainFastLoader,
+          keys: exec_field.objects.map { _1["first"] },
+        )
+        .then do |values|
+          exec_field.lazy(
+            loader_class: DrainSyncLoader,
+            keys: values,
+          )
+        end
+    end
+  end
+
+  class AbortedPendingResolver < GraphQL::Breadth::FieldResolver
+    def resolve(exec_field, _ctx)
+      exec_field
+        .lazy(
+          loader_class: AbortInitialLoader,
+          keys: exec_field.objects.map { _1["second"] },
+        )
+        .then do |values|
+          exec_field.lazy(
+            loader_class: AbortedPendingLoader,
+            keys: values,
+          )
+        end
+    end
+  end
+
   LOADER_SCHEMA = GraphQL::Schema.from_definition(%|
     type Widget {
       first: String
       second: String
       third: String
+      required: String!
       syncObject: Widget
       syncScalar: String
     }
 
     type Query {
       widget: Widget
+      widgets: [Widget]
     }
   |)
 
@@ -378,11 +715,13 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
       "first" => FirstResolver.new,
       "second" => SecondResolver.new,
       "third" => ThirdResolver.new,
+      "required" => GraphQL::Breadth::HashKeyResolver.new("required"),
       "syncObject" => GraphQL::Breadth::HashKeyResolver.new("syncObject"),
       "syncScalar" => GraphQL::Breadth::HashKeyResolver.new("syncScalar"),
     },
     "Query" => {
       "widget" => GraphQL::Breadth::HashKeyResolver.new("widget"),
+      "widgets" => GraphQL::Breadth::HashKeyResolver.new("widgets"),
     },
   }.freeze
 
@@ -393,6 +732,17 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     ChainedConcurrentLoader.reset_tracking!
     FanoutMapLoader.reset_tracking!
     SharedResourceTracker.reset_tracking!
+    AsyncFlowTracker.reset_tracking!
+    AbortedPendingLoader.reset_tracking!
+  end
+
+  def assert_event_before(events, before:, after:)
+    before_event = before
+    after_event = after
+
+    assert_includes events, before_event
+    assert_includes events, after_event
+    assert_operator events.index(before_event), :<, events.index(after_event)
   end
 
   def test_splits_loaders_by_group_across_fields
@@ -496,7 +846,13 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
     assert_equal expected, executor.result
-    assert_equal 2, ConcurrentLoader.max_active
+
+    assert_equal [
+      [:start, "a"],
+      [:start, "b"],
+      [:finish, "b"],
+      [:finish, "a"],
+    ], ConcurrentLoader.events
   end
 
   def test_concurrency_loaders_respect_resource_limits
@@ -532,6 +888,13 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
     assert_equal expected, executor.result
+
+    assert_equal [
+      [:start, "a"],
+      [:finish, "a"],
+      [:start, "b"],
+      [:finish, "b"],
+    ], LimitedConcurrentLoader.events
     assert_equal 1, LimitedConcurrentLoader.max_active
   end
 
@@ -550,7 +913,7 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     resolvers = LOADER_RESOLVERS.merge(
       "Widget" => LOADER_RESOLVERS["Widget"].merge(
-        "first" => LoaderResolver.new(loader_class: BoomConcurrentLoader, key: "first"),
+        "first" => LoaderResolver.new(loader_class: ErrorConcurrentLoader, key: "first"),
       ),
     )
 
@@ -622,7 +985,10 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     assert_equal expected, executor.result
 
     events = ChainedConcurrentLoader.events
-    assert_operator events.index([:start, "chain"]), :<, events.index([:finish, "slow"])
+    assert_event_before events, before: [:start, "fast"], after: [:finish, "fast"]
+    assert_event_before events, before: [:start, "slow"], after: [:start, "chain"]
+    assert_event_before events, before: [:finish, "fast"], after: [:start, "chain"]
+    assert_event_before events, before: [:start, "chain"], after: [:finish, "slow"]
   end
 
   def test_async_requeued_promise_without_loader_raises
@@ -648,6 +1014,307 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     error = assert_raises(GraphQL::Breadth::ImplementationError) { executor.result }
     assert_match(/produced a promise without a loader/, error.message)
+  end
+
+  def test_async_loaders_reject_conflicting_limits_for_shared_resource
+    document = GraphQL.parse(%|{
+      widget {
+        first
+        second
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+        "second" => "Banana",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: ConflictingLimitOneLoader, key: "first"),
+        "second" => LoaderResolver.new(loader_class: ConflictingLimitTwoLoader, key: "second"),
+      ),
+    )
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+
+    error = assert_raises(ArgumentError) { executor.result }
+    assert_match(/Conflicting lazy async limits for resource :conflicting_async_resource: 1 and 2/, error.message)
+  end
+
+  def test_async_map_releases_parent_resource_permit_before_same_resource_fanout
+    document = GraphQL.parse(%|{
+      widgets {
+        first
+      }
+    }|)
+
+    source = {
+      "widgets" => [
+        { "first" => "Apple" },
+        { "first" => "Banana" },
+      ],
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: SameResourceFanoutLoader, key: "first"),
+      ),
+    )
+
+    expected = {
+      "data" => {
+        "widgets" => [
+          { "first" => "Apple-same-resource" },
+          { "first" => "Banana-same-resource" },
+        ],
+      },
+    }
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    assert_equal expected, Timeout.timeout(1) { executor.result }
+
+    assert_equal [
+      [:start, [:same_resource_fanout, "Apple"]],
+      [:finish, [:same_resource_fanout, "Apple"]],
+      [:start, [:same_resource_fanout, "Banana"]],
+      [:finish, [:same_resource_fanout, "Banana"]],
+    ], AsyncFlowTracker.events
+    assert_equal 1, AsyncFlowTracker.max_active
+  end
+
+  def test_async_loader_timeout_raises
+    document = GraphQL.parse(%|{
+      widget {
+        first
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: LoaderTimeoutLoader, key: "first"),
+      ),
+    )
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+
+    assert_raises(::Async::TimeoutError) { executor.result }
+  end
+
+  def test_async_child_timeout_raises
+    document = GraphQL.parse(%|{
+      widget {
+        first
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: ChildTimeoutLoader, key: "first"),
+      ),
+    )
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+
+    assert_raises(::Async::TimeoutError) { executor.result }
+  end
+
+  def test_async_child_work_validates_arguments
+    document = GraphQL.parse(%|{
+      widget {
+        first
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+      },
+    }
+
+    [
+      [MissingAsyncBlockLoader, /LazyLoader#async requires a block/],
+      [MissingAsyncMapBlockLoader, /LazyLoader#async_map requires a block/],
+      [InvalidChildLimitLoader, /Lazy async limit must be positive/],
+      [InvalidChildTimeoutLoader, /Lazy async timeout must be positive/],
+    ].each do |loader_class, message|
+      resolvers = LOADER_RESOLVERS.merge(
+        "Widget" => LOADER_RESOLVERS["Widget"].merge(
+          "first" => LoaderResolver.new(loader_class: loader_class, key: "first"),
+        ),
+      )
+
+      executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+
+      error = assert_raises(ArgumentError) { executor.result }
+      assert_match message, error.message
+    end
+  end
+
+  def test_async_limit_nil_runs_child_work_without_a_semaphore
+    document = GraphQL.parse(%|{
+      widgets {
+        first
+      }
+    }|)
+
+    source = {
+      "widgets" => [
+        { "first" => "Apple" },
+        { "first" => "Banana" },
+      ],
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: UnlimitedFanoutLoader, key: "first"),
+      ),
+    )
+
+    expected = {
+      "data" => {
+        "widgets" => [
+          { "first" => "Apple-unlimited" },
+          { "first" => "Banana-unlimited" },
+        ],
+      },
+    }
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    assert_equal expected, executor.result
+
+    assert_equal [
+      [:start, [:unlimited_fanout, "Apple"]],
+      [:start, [:unlimited_fanout, "Banana"]],
+      [:finish, [:unlimited_fanout, "Banana"]],
+      [:finish, [:unlimited_fanout, "Apple"]],
+    ], AsyncFlowTracker.events
+    assert_equal 2, AsyncFlowTracker.max_active
+  end
+
+  def test_async_scheduler_waits_for_requeued_work_targeting_active_loader
+    document = GraphQL.parse(%|{
+      widget {
+        first
+        second
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+        "second" => "Banana",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => ActiveSkipChainResolver.new,
+        "second" => LoaderResolver.new(loader_class: ActiveSkipLoader, key: "second"),
+      ),
+    )
+
+    expected = {
+      "data" => {
+        "widget" => {
+          "first" => "Apple-fast-active",
+          "second" => "Banana-active",
+        },
+      },
+    }
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    assert_equal expected, executor.result
+
+    events = AsyncFlowTracker.events
+    assert_event_before events, before: [:start, [:active_skip, ["Banana"]]], after: [:finish, [:active_skip_producer, ["Apple"]]]
+    assert_event_before events, before: [:finish, [:active_skip_producer, ["Apple"]]], after: [:start, [:active_skip, ["Apple-fast"]]]
+    assert_event_before events, before: [:finish, [:active_skip, ["Banana"]]], after: [:start, [:active_skip, ["Apple-fast"]]]
+  end
+
+  def test_async_scheduler_executes_requeued_sync_batches_while_async_sibling_is_active
+    document = GraphQL.parse(%|{
+      widget {
+        first
+        second
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+        "second" => "Banana",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => DrainSyncChainResolver.new,
+        "second" => LoaderResolver.new(loader_class: DrainSlowLoader, key: "second"),
+      ),
+    )
+
+    expected = {
+      "data" => {
+        "widget" => {
+          "first" => "Apple-fast-sync",
+          "second" => "Banana-slow",
+        },
+      },
+    }
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    assert_equal expected, executor.result
+
+    events = AsyncFlowTracker.events
+    assert_event_before events, before: [:start, [:drain_slow, ["Banana"]]], after: [:sync, [:drain_sync, ["Apple-fast"]]]
+    assert_event_before events, before: [:finish, [:drain_fast, ["Apple"]]], after: [:sync, [:drain_sync, ["Apple-fast"]]]
+    assert_event_before events, before: [:sync, [:drain_sync, ["Apple-fast"]]], after: [:finish, [:drain_slow, ["Banana"]]]
+  end
+
+  def test_async_scheduler_resets_aborted_requeued_batches_without_missing_loader_error
+    document = GraphQL.parse(%|{
+      widget {
+        second
+        required
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "second" => "chain",
+        "required" => "abort",
+      },
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "second" => AbortedPendingResolver.new,
+        "required" => LoaderResolver.new(loader_class: AbortInitialLoader, key: "required"),
+      ),
+    )
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    result = Timeout.timeout(1) { executor.result }
+
+    assert_equal({ "widget" => nil }, result["data"])
+    assert_equal "Cannot return null for non-nullable field Widget.required", result.dig("errors", 0, "message")
+    assert_equal ["widget", "required"], result.dig("errors", 0, "path")
+    refute AbortedPendingLoader.performed
   end
 
   def test_async_map_fans_out_inside_loader_with_ordered_results
@@ -683,6 +1350,13 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
     assert_equal expected, executor.result
+
+    assert_equal [
+      [:start, "Apple"],
+      [:start, "Banana"],
+      [:finish, "Banana"],
+      [:finish, "Apple"],
+    ], FanoutMapLoader.events
     assert_equal 2, FanoutMapLoader.max_active
   end
 
@@ -719,6 +1393,17 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
     assert_equal expected, executor.result
+
+    assert_equal Set[
+      [:fanout, "Apple"],
+      [:plain, ["Banana"]],
+    ], SharedResourceTracker.events.filter_map { |event, label| label if event == :enter }.to_set
+
+    SharedResourceTracker.events.each_slice(2) do |enter_event, leave_event|
+      assert_equal :enter, enter_event.first
+      assert_equal :leave, leave_event.first
+      assert_equal enter_event.last, leave_event.last
+    end
     assert_equal 1, SharedResourceTracker.max_active
   end
 
@@ -739,8 +1424,8 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
 
     resolvers = LOADER_RESOLVERS.merge(
       "Widget" => LOADER_RESOLVERS["Widget"].merge(
-        "first" => LoaderResolver.new(loader_class: BoomFanoutMapLoader, key: "first"),
-        "second" => LoaderResolver.new(loader_class: BoomFanoutMapLoader, key: "second"),
+        "first" => LoaderResolver.new(loader_class: ErrorFanoutMapLoader, key: "first"),
+        "second" => LoaderResolver.new(loader_class: ErrorFanoutMapLoader, key: "second"),
       ),
     )
 
