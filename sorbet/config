@@ -2,6 +2,7 @@
 lib
 --parser=prism
 --enable-experimental-rbs-comments
+--enable-experimental-requires-ancestor
 --dir
 sorbet/rbi
 --ignore=/test/

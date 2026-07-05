@@ -386,6 +386,86 @@ class ChainingResolver < GraphQL::Breadth::FieldResolver
 end
 ```
 
+### Loader concurrency
+
+Lazy loaders may engage Ruby's fiber-based concurrency to asynchronously queue scheduler-compatible I/O, such as `async-http` requests (CPU-bound work and thread-blocking clients cannot be parallelized). Running the scheduler is not free, so loaders operate synchronously by default and must manually opt into async workflows when built to leverage them.
+
+#### Install
+
+Lazy concurrency requires the `async` gem as an opt-in dependency. Add `async` to your Gemfile and then enable it with an initializer:
+
+```ruby
+# Gemfile
+gem "async", "~> 2.0"
+
+# config/initializers/graphql_breadth.rb
+GraphQL::Breadth.enable_async!
+```
+
+#### Async loaders
+
+A LazyLoader class may opt into asynchronous execution by calling `async` with concurrency settings. All async loader classes will parallelize during common lazy execution cycles:
+
+```ruby
+class RemoteInventoryLoader < GraphQL::Breadth::LazyLoader
+  async resource: :inventory_api, limit: 4, timeout: 2
+
+  def perform(keys, context)
+    client = context[:inventory_client]
+
+    keys.each do |key|
+      fulfill_key(key, client.fetch_inventory(key))
+    end
+  end
+end
+```
+
+All concurrency settings are optional:
+
+* `resource: Symbol`, coordinates limits across related loaders hitting the same upstream resource. Defaults to a unique resource identity per loader class.
+* `limit: Integer`, number of concurrent operations allowed while hitting the resource. Defaults to 8.
+* `timeout: Integer`, number of seconds to wait on load operations before timing out. Defaults to no limit.
+
+#### Async fan-out
+
+Async LazyLoader classes may also fan-out their internal implementations using the `async` _instance_ method.
+
+```ruby
+class RemoteInventoryLoader < GraphQL::Breadth::LazyLoader
+  # class is async across lazy loaders...
+  async resource: :inventory_api, limit: 8, timeout: 2
+
+  def perform(keys, context)
+    client = context[:inventory_client]
+    futures_by_key = keys.each_with_object({}) do |key, memo|
+      # internals add async fan-out...
+      memo[key] = async { client.fetch_inventory(key) }
+    end
+
+    futures_by_key.each_pair do |key, future|
+      fulfill_key(key, future.wait)
+    end
+  end
+end
+```
+
+There's also an `async_map` variation available:
+
+```ruby
+class RemoteInventoryLoader < GraphQL::Breadth::LazyLoader
+  async resource: :inventory_api, limit: 8, timeout: 2
+
+  def map? = true
+
+  def perform_map(keys, context)
+    client = context[:inventory_client]
+    async_map(keys) { |key| client.fetch_inventory(key) }
+  end
+end
+```
+
+These fan-out instance methods share resource budgeting with their loader class by default. They can also specify their own `resource:`, `limit:`, and/or `timeout:` arguments to manage separate budgets from their loader class.
+
 ## Query planning
 
 The breadth executor operates on an [execution tree](#execution-taxonomy) in three phases:

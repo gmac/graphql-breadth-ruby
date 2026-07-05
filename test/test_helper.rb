@@ -5,6 +5,7 @@ Gem.path.each do |path|
   # ignore warnings from auto-generated GraphQL lib code.
   Warning.ignore(/.*mismatched indentations.*/)
   Warning.ignore(/.*lib\/graphql\/language\/nodes.rb:.*/)
+  Warning.ignore(/.*io-event.*IO::Buffer is experimental.*/)
 end
 
 require 'bundler/setup'
@@ -15,6 +16,7 @@ require 'minitest/autorun'
 require 'minitest/stub_const'
 
 require 'graphql/breadth'
+GraphQL::Breadth.enable_async!
 require 'graphql/batch'
 require_relative './fixtures'
 require_relative './star_wars_fixtures'

@@ -14,6 +14,26 @@ module GraphQL
       def report_error(error)
         on_report_error&.call(error)
       end
+
+      #: -> bool
+      def async_enabled?
+        @async_enabled == true
+      end
+
+      #: -> void
+      def enable_async!
+        return if async_enabled?
+
+        require "async"
+        require "async/barrier"
+        require "async/queue"
+        require "async/semaphore"
+
+        @async_enabled = true
+      rescue LoadError => e
+        @async_enabled = false
+        raise ImplementationError, "Async lazy loaders require the `async` gem. Add `gem \"async\"` to your bundle. #{e.message}"
+      end
     end
 
     EMPTY_OBJECT = {}.freeze

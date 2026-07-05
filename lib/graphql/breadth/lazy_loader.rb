@@ -5,6 +5,26 @@ module GraphQL
   module Breadth
     #: [ContextType < GraphQL::Query::Context]
     class LazyLoader
+      AsyncSettings = Data.define(:enabled, :limit, :resource, :timeout) do
+        alias_method :enabled?, :enabled
+      end
+
+      # Snapshots a loader's promised elements before execution resets loader state.
+      Batch = Data.define(:loader, :elements) do
+        def aborted?
+          elements.all? do |element|
+            case element
+            when Executor::ExecutionField
+              element.scope.aborted_subtree?
+            when Executor::ExecutionScope
+              element.aborted_subtree?
+            else
+              raise ImplementationError, "Invalid lazy element: #{element.inspect}"
+            end
+          end
+        end
+      end
+
       class LazyFulfillment
         #: Executor::LazyElement
         attr_reader :element
@@ -45,6 +65,37 @@ module GraphQL
 
       KEY_OMISSION = Object.new.freeze
 
+      DEFAULT_ASYNC_SETTINGS = AsyncSettings.new(
+        enabled: false,
+        limit: nil,
+        resource: nil,
+        timeout: nil,
+      ).freeze
+
+      class << self
+        #: (?limit: Integer?, ?resource: Symbol?, ?timeout: Numeric?) -> void
+        def async(limit: 8, resource: nil, timeout: nil)
+          unless GraphQL::Breadth.async_enabled?
+            Kernel.raise ImplementationError, "Async lazy loaders require `GraphQL::Breadth.enable_async!` during initialization."
+          end
+
+          raise ArgumentError, "Lazy async limit must be positive" unless limit.nil? || limit > 0
+          raise ArgumentError, "Lazy async timeout must be positive" unless timeout.nil? || timeout > 0
+
+          @async_settings = AsyncSettings.new(
+            enabled: true,
+            limit: limit,
+            resource: resource || name&.to_sym || :"lazy_loader_#{object_id}",
+            timeout: timeout,
+          ).freeze
+        end
+
+        #: -> AsyncSettings
+        def async_settings
+          @async_settings || DEFAULT_ASYNC_SETTINGS
+        end
+      end
+
       #: Hash[untyped, untyped]
       attr_reader :pending_keys_by_identity
 
@@ -59,6 +110,12 @@ module GraphQL
         @pending_keys_by_identity = {}
         @results_by_identity = {}
         @promised = []
+        @async_context = nil
+      end
+
+      #: -> Batch
+      def to_batch
+        Batch.new(loader: self, elements: promised.map(&:element))
       end
 
       #: -> bool
@@ -69,6 +126,29 @@ module GraphQL
       #: -> bool
       def resolve_one?
         false
+      end
+
+      #: -> AsyncSettings
+      def async_settings
+        self.class.async_settings
+      end
+
+      #: (?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ -> untyped } -> Executor::LazyAsync::Future
+      def async(resource: nil, limit: nil, timeout: nil, &block)
+        unless @async_context
+          raise ImplementationError, "LazyLoader#async requires the loader class to opt into async features via `async(...)`."
+        end
+
+        @async_context.async(resource: resource, limit: limit, timeout: timeout, &block)
+      end
+
+      #: [T, U] (Enumerable[T], ?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ (T) -> U } -> Array[U]
+      def async_map(collection, resource: nil, limit: nil, timeout: nil, &block)
+        unless @async_context
+          raise ImplementationError, "LazyLoader#async_map requires the loader class to opt into async features via `async(...)`."
+        end
+
+        @async_context.async_map(collection, resource: resource, limit: limit, timeout: timeout, &block)
       end
 
       #: (Array[untyped], ContextType) -> void
@@ -147,8 +227,10 @@ module GraphQL
         end
       end
 
-      #: (ContextType) -> void
-      def execute!(context)
+      #: (ContextType, ?async_context: Executor::LazyAsync::LoaderContext?) -> void
+      def execute!(context, async_context: nil)
+        previous_async_context = @async_context
+        @async_context = async_context
         fulfillments = @promised
         unless @pending_keys_by_identity.empty?
           pending_loader_keys = @pending_keys_by_identity.values
@@ -176,6 +258,8 @@ module GraphQL
         end
 
         fulfillments.each { |fulfillment| fulfillment.resolve(collect_results(fulfillment)) }
+      ensure
+        @async_context = previous_async_context
       end
 
       #: -> void
