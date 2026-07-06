@@ -1,122 +1,110 @@
 # frozen_string_literal: true
 
 require "graphql/breadth"
-require "time"
+require "set"
+
+GraphQL::Breadth.enable_async!
 
 module Example
   module Schema
     SDL = <<~GRAPHQL
+      directive @defer(if: Boolean, label: String) on INLINE_FRAGMENT | FRAGMENT_SPREAD
+
       schema {
         query: Query
         mutation: Mutation
         subscription: Subscription
       }
 
-      directive @defer(if: Boolean = true, label: String) on FRAGMENT_SPREAD | INLINE_FRAGMENT
+      type MagicCard {
+        id: ID!
+        name: String!
+        uri: String!
+        imageUri: String!
+        set: MagicSet
+        rulings: [MagicCardRuling!]
+      }
+
+      type MagicSet {
+        id: ID!
+        code: String!
+        name: String!
+        uri: String!
+      }
+
+      type MagicCardRuling {
+        date: String!
+        comment: String!
+      }
 
       type Query {
-        hello(name: String = "world"): Greeting!
-        serverTime: String!
+        magicCards: [MagicCard!]!
       }
 
       type Mutation {
-        echo(message: String!): String!
+        addAnotherCard: MagicCard!
       }
 
       type Subscription {
-        greetings: Greeting!
-      }
-
-      type Greeting {
-        message: String!
-        delayed(seconds: Int = 5): String!
-        sequence: Int!
+        cardAdded: MagicCard!
       }
     GRAPHQL
 
     GRAPHQL_SCHEMA = GraphQL::Schema.from_definition(SDL)
 
-    class HelloResolver < GraphQL::Breadth::FieldResolver
-      def resolve(exec_field, _context)
-        name = exec_field.arguments[:name] || "world"
-        exec_field.resolve_all(Example::Schema.greeting(name: name, sequence: 1))
-      end
-    end
-
-    class ServerTimeResolver < GraphQL::Breadth::FieldResolver
-      def resolve(exec_field, _context)
-        exec_field.resolve_all(Time.now.utc.iso8601)
-      end
-    end
-
-    class EchoResolver < GraphQL::Breadth::FieldResolver
-      def resolve(exec_field, _context)
-        exec_field.resolve_all(exec_field.arguments.fetch(:message))
-      end
-    end
-
-    class DelayedResolver < GraphQL::Breadth::FieldResolver
-      def resolve(exec_field, _context)
-        seconds = exec_field.arguments[:seconds]
-        seconds = 5 if seconds.nil?
-        seconds = [seconds.to_i, 0].max
-
-        sleep seconds
-        exec_field.map_objects { "Delivered after #{seconds} seconds by graphql-breadth @defer." }
-      end
-    end
-
-    class GreetingsSubscriptionResolver < GraphQL::Breadth::FieldResolver
-      def subscribe(_exec_field, context)
-        event_bus = context[:event_bus]
-
-        raise GraphQL::ExecutionError, "No event bus configured" unless event_bus
-
-        event_bus.subscribe
-      end
-
-      def resolve(exec_field, _context)
-        exec_field.map_objects(&:itself)
-      end
-    end
+    require_relative "card_store"
+    require_relative "resolvers/query/magic_cards"
+    require_relative "resolvers/mutation/add_another_card"
+    require_relative "resolvers/subscription/card_added"
+    require_relative "resolvers/magic_card/set"
+    require_relative "resolvers/magic_card/rulings"
 
     RESOLVERS = {
       "Query" => {
-        "hello" => HelloResolver.new,
-        "serverTime" => ServerTimeResolver.new,
+        "magicCards" => Example::Resolvers::Query::MagicCards.new,
       },
       "Mutation" => {
-        "echo" => EchoResolver.new,
+        "addAnotherCard" => Example::Resolvers::Mutation::AddAnotherCard.new,
       },
       "Subscription" => {
-        "greetings" => GreetingsSubscriptionResolver.new,
+        "cardAdded" => Example::Resolvers::Subscription::CardAdded.new,
       },
-      "Greeting" => {
-        "message" => GraphQL::Breadth::HashKeyResolver.new("message"),
-        "delayed" => DelayedResolver.new,
-        "sequence" => GraphQL::Breadth::HashKeyResolver.new("sequence"),
+      "MagicCard" => {
+        "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+        "name" => GraphQL::Breadth::HashKeyResolver.new("name"),
+        "imageUri" => GraphQL::Breadth::HashKeyResolver.new("imageUri"),
+        "uri" => GraphQL::Breadth::HashKeyResolver.new("uri"),
+        "set" => Example::Resolvers::MagicCard::Set.new,
+        "rulings" => Example::Resolvers::MagicCard::Rulings.new,
+      },
+      "MagicSet" => {
+        "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+        "code" => GraphQL::Breadth::HashKeyResolver.new("code"),
+        "name" => GraphQL::Breadth::HashKeyResolver.new("name"),
+        "uri" => GraphQL::Breadth::HashKeyResolver.new("uri"),
+      },
+      "MagicCardRuling" => {
+        "date" => GraphQL::Breadth::HashKeyResolver.new("date"),
+        "comment" => GraphQL::Breadth::HashKeyResolver.new("comment"),
       },
     }.freeze
 
     module_function
 
-    def executor(document, variables: {}, context: {})
+    def card_store
+      @card_store ||= CardStore.new
+    end
+
+    def executor(document, variables: {}, context: {}, root_object: card_store, operation_name: nil)
       GraphQL::Breadth::Executor.new(
         GRAPHQL_SCHEMA,
         document,
         resolvers: RESOLVERS,
-        root_object: {},
+        root_object: root_object,
         variables: variables,
         context: context,
+        operation_name: operation_name,
       )
-    end
-
-    def greeting(name:, sequence:)
-      {
-        "message" => "Hello, #{name}!",
-        "delayed" => "Delivered later by graphql-breadth @defer.",
-        "sequence" => sequence,
-      }
     end
   end
 end

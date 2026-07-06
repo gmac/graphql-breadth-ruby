@@ -285,18 +285,19 @@
             button.textContent = "Sending";
 
             try {
-              const response = await fetch(modeConfig.trigger.path, {
+              const response = await fetch("/graphql", {
                 method: "post",
                 headers: {
                   "Accept": "application/json",
                   "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ name: "SSE" }),
+                body: JSON.stringify(modeConfig.trigger.graphqlParams),
               });
               const payload = await response.json();
               if (!response.ok) throw new Error(payload.errors?.[0]?.message || "Request failed");
+              if (payload.errors?.length) throw new Error(payload.errors[0].message);
 
-              button.textContent = `Sent #${payload.event.sequence}`;
+              button.textContent = "Added";
             } catch (error) {
               button.textContent = "Error";
             } finally {
@@ -316,6 +317,10 @@
         }, []);
 
         const graphQLFetcher = React.useCallback((graphQLParams, fetcherOptions = {}) => {
+          if (isIntrospectionRequest(graphQLParams)) {
+            return fetchGraphQL(graphQLParams, fetcherOptions.headers);
+          }
+
           startedAt.current = performance.now();
           setStreamEvents([]);
           setStatus("running");
@@ -375,6 +380,12 @@
             status,
           })
         );
+      }
+
+      function isIntrospectionRequest(graphQLParams) {
+        const query = graphQLParams?.query;
+        return graphQLParams?.operationName === "IntrospectionQuery"
+          || (typeof query === "string" && /\b__(?:schema|type)\b/.test(query));
       }
 
       function createGraphiQLStorage(defaults) {

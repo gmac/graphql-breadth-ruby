@@ -967,6 +967,9 @@ module GraphQL
         operation = @query.selected_operation
         return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
 
+        operation = @query.selected_operation
+        return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
+
         begin
           @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
         rescue InputValidationErrorSet => input_error

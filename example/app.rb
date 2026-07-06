@@ -4,159 +4,33 @@ require "erb"
 require "json"
 require "rack/request"
 require "rack/response"
-require "thread"
 
+require_relative "lib/example/event_bus"
+require_relative "lib/example/graphiql_view_data"
 require_relative "lib/example/schema"
 
 module Example
   class App
     GRAPHQL_PATH = "/graphql"
-    EVENT_PATH = "/events/greeting"
     MULTIPART_BOUNDARY = "graphql"
     VIEW_ROOT = File.expand_path("views", __dir__)
-    MODES = {
-      "query" => {
-        "path" => "/query",
-        "label" => "Query/Mutation",
-        "transport" => "json",
-        "defaultQuery" => <<~GRAPHQL,
-          query Hello($name: String) {
-            hello(name: $name) {
-              message
-              sequence
-            }
-            serverTime
-          }
 
-          mutation Echo($message: String!) {
-            echo(message: $message)
-          }
-        GRAPHQL
-        "variables" => {
-          "name" => "breadth",
-          "message" => "Hello from a graphql-breadth mutation",
-        },
-      },
-      "defer" => {
-        "path" => "/defer",
-        "label" => "Defer",
-        "transport" => "sse",
-        "defaultQuery" => <<~GRAPHQL,
-          query DeferredHello($name: String, $outerDelay: Int, $innerDelay: Int) {
-            hello(name: $name) {
-              message
-              ... @defer(label: "later") {
-                delayed(seconds: $outerDelay)
-                ... @defer(label: "later2") {
-                  lazy: delayed(seconds: $innerDelay)
-                }
-              }
-            }
-          }
-        GRAPHQL
-        "variables" => {
-          "name" => "breadth",
-          "outerDelay" => 5,
-          "innerDelay" => 10,
-        },
-        "inspector" => {
-          "title" => "SSE Stream",
-          "empty" => "Run the operation to see SSE payloads",
-        },
-      },
-      "subscriptions" => {
-        "path" => "/subscriptions",
-        "label" => "Subscriptions",
-        "transport" => "sse",
-        "defaultQuery" => <<~GRAPHQL,
-          subscription Greetings {
-            greetings {
-              message
-              sequence
-            }
-          }
-        GRAPHQL
-        "variables" => {},
-        "inspector" => {
-          "title" => "SSE Events",
-          "empty" => "Start the subscription, then send an event",
-        },
-        "trigger" => {
-          "path" => EVENT_PATH,
-          "label" => "Send Event",
-        },
-      },
-    }.freeze
-    NAV_ITEMS = MODES.map do |id, config|
-      {
-        "id" => id,
-        "path" => config.fetch("path"),
-        "label" => config.fetch("label"),
-      }
-    end.freeze
-
-    class EventBus
-      def initialize
-        @mutex = Mutex.new
-        @sequence = 0
-        @subscribers = []
-      end
-
-      def subscribe
-        queue = Queue.new
-
-        @mutex.synchronize do
-          @subscribers << queue
-        end
-
-        Enumerator.new do |events|
-          begin
-            loop do
-              events << queue.pop
-            end
-          ensure
-            @mutex.synchronize do
-              @subscribers.delete(queue)
-            end
-          end
-        end
-      end
-
-      def publish(name:)
-        event = nil
-        subscribers = nil
-
-        @mutex.synchronize do
-          @sequence += 1
-          event = Example::Schema.greeting(name: name, sequence: @sequence)
-          subscribers = @subscribers.dup
-        end
-
-        subscribers.each { |queue| queue << event }
-
-        {
-          "event" => event,
-          "subscribers" => subscribers.length,
-        }
-      end
-    end
-
-    def initialize(event_bus: EventBus.new)
+    def initialize(event_bus: EventBus.new, card_store: Example::Schema.card_store)
       @event_bus = event_bus
+      @card_store = card_store
     end
 
     def call(env)
       request = Rack::Request.new(env)
 
-      return redirect_response(MODES.fetch("query").fetch("path")) if request.get? && request.path_info == "/"
+      return redirect_response(GraphiQLViewData.default_path) if request.get? && request.path_info == "/"
 
       if request.get?
-        mode_id = mode_id_for_path(request.path_info)
-        return graphiql_response(mode_id) if mode_id
+        view_data = GraphiQLViewData.for_path(request.path_info)
+        return graphiql_response(view_data) if view_data
       end
 
-      return cors_response if request.options? && [GRAPHQL_PATH, EVENT_PATH].include?(request.path_info)
-      return event_response(request) if request.post? && request.path_info == EVENT_PATH
+      return cors_response if request.options? && request.path_info == GRAPHQL_PATH
       return graphql_response(request) if graphql_request?(request)
 
       json_response({ "errors" => [{ "message" => "Not found" }] }, status: 404)
@@ -186,11 +60,17 @@ module Example
       executor = Example::Schema.executor(
         document,
         variables: params.fetch("variables", {}),
+        root_object: @card_store,
+        operation_name: params["operationName"],
         context: {
           request_id: request.get_header("HTTP_X_REQUEST_ID"),
           event_bus: @event_bus,
         },
       )
+
+      unless executor.query.selected_operation
+        return json_response({ "errors" => executor.query.static_errors.map(&:to_h) }, status: 400)
+      end
 
       if executor.subscription?
         return subscription_response(executor, request)
@@ -233,20 +113,8 @@ module Example
 
       raw_params = stringify_keys(raw_params)
       raw_params["variables"] = parse_variables(raw_params["variables"])
+      raw_params["operationName"] = nil if raw_params["operationName"].to_s.empty?
       raw_params
-    end
-
-    def event_response(request)
-      params = event_params(request)
-      name = params.fetch("name", "SSE").to_s
-      name = "SSE" if name.empty?
-
-      json_response(@event_bus.publish(name: name))
-    end
-
-    def event_params(request)
-      body = request.body.read
-      body.empty? ? {} : stringify_keys(JSON.parse(body))
     end
 
     def parse_variables(value)
@@ -328,14 +196,9 @@ module Example
       ]
     end
 
-    def graphiql_response(mode_id)
+    def graphiql_response(view_data)
       Rack::Response.new(
-        render_view(
-          "graphiql",
-          current_mode: mode_id,
-          mode_config: MODES.fetch(mode_id),
-          nav_items: NAV_ITEMS,
-        ),
+        render_view("graphiql", view_data),
         200,
         cors_headers.merge("content-type" => "text/html; charset=utf-8"),
       ).finish
@@ -359,10 +222,6 @@ module Example
         "access-control-allow-headers" => "Content-Type, Accept, X-Request-ID",
         "access-control-allow-methods" => "GET, POST, OPTIONS",
       }
-    end
-
-    def mode_id_for_path(path)
-      MODES.find { |_, config| config.fetch("path") == path }&.first
     end
 
     def render_view(name, locals = {})
