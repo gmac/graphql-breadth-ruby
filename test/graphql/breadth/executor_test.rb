@@ -34,6 +34,58 @@ class GraphQL::Breadth::ExecutorTest < Minitest::Test
     assert_equal expected, breadth(document, source).dig("data")
   end
 
+  def test_selects_named_operation
+    document = %|
+      query ProductList {
+        products(first: 1) {
+          nodes {
+            title
+          }
+        }
+      }
+
+      query CurrentNode {
+        node(id: "Product/1") {
+          __typename
+        }
+      }
+    |
+
+    source = {
+      "products" => { "nodes" => [{ "title" => "GraphQL T-Shirt" }] },
+      "node" => { "__typename__" => "Product" },
+    }
+
+    expected = {
+      "node" => { "__typename" => "Product" },
+    }
+
+    assert_equal expected, breadth(document, source, operation_name: "CurrentNode").dig("data")
+  end
+
+  def test_returns_error_when_operation_name_is_required
+    document = %|
+      query ProductList {
+        products(first: 1) {
+          nodes {
+            title
+          }
+        }
+      }
+
+      query CurrentNode {
+        node(id: "Product/1") {
+          __typename
+        }
+      }
+    |
+
+    result = breadth(document, {})
+
+    assert_equal "An operation name is required", result.dig("errors", 0, "message")
+    refute result.key?("data")
+  end
+
   def test_mutations_run_serially
     document = %|mutation {
       a: writeValue(value: "test1") {

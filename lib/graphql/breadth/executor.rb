@@ -60,14 +60,15 @@ module GraphQL
       #|   ?root_object: untyped,
       #|   ?variables: Hash[String | Symbol, untyped],
       #|   ?context: Hash[String | Symbol, untyped],
+      #|   ?operation_name: String?,
       #|   ?tracers: Array[Tracer],
       #|   ?authorization: singleton(Authorization),
       #| ) -> void
-      def initialize(schema, document, resolvers: EMPTY_OBJECT, root_object: nil, variables: {}, context: {}, tracers: [], authorization: Authorization)
+      def initialize(schema, document, resolvers: EMPTY_OBJECT, root_object: nil, variables: {}, context: {}, operation_name: nil, tracers: [], authorization: Authorization)
         @provided_variables = variables.each_with_object({}) { |(key, value), out| out[key.to_s] = value }
         @schema = schema
         @resolvers = resolvers
-        @query = GraphQL::Query.new(schema, document: document, variables: @provided_variables, context: context) # << for schema reference
+        @query = GraphQL::Query.new(schema, document: document, variables: @provided_variables, context: context, operation_name: operation_name) # << for schema reference
         @context = @query.context
         @input = InputFormatter.new(@context)
         @planner = ExecutionPlanner.new(executor: self, resolvers: @resolvers)
@@ -93,17 +94,17 @@ module GraphQL
 
       #: -> bool
       def query?
-        @query.selected_operation.operation_type == ExecutionPlanner::QUERY_OPERATION
+        @query.selected_operation&.operation_type == ExecutionPlanner::QUERY_OPERATION
       end
 
       #: -> bool
       def mutation?
-        @query.selected_operation.operation_type == ExecutionPlanner::MUTATION_OPERATION
+        @query.selected_operation&.operation_type == ExecutionPlanner::MUTATION_OPERATION
       end
 
       #: -> bool
       def subscription?
-        @query.selected_operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
+        @query.selected_operation&.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
       end
 
       #: -> Hash[String, GraphQL::Language::Nodes::FragmentDefinition]
@@ -175,6 +176,7 @@ module GraphQL
           root_object: object,
           variables: @provided_variables,
           context: @context_value,
+          operation_name: @query.operation_name,
           tracers: @tracers,
           authorization: @authorization_class,
         ).execute
@@ -267,13 +269,8 @@ module GraphQL
           @tracers.each { _1.start(self, @context) }
         end
 
-        # reference selected operation first to trigger AST evaluation
         operation = @query.selected_operation
-
-        if !@context.errors.empty?
-          # Return any parsing errors
-          return build_result(errors: @context.errors.map(&:to_h))
-        end
+        return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
 
         begin
           @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
@@ -966,11 +963,9 @@ module GraphQL
       #: -> (SubscriptionResponseStream | graphql_result)
       def execute_subscription
         @executed = true
-        operation = @query.selected_operation
 
-        unless @context.errors.empty?
-          return build_result(errors: @context.errors.map(&:to_h))
-        end
+        operation = @query.selected_operation
+        return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
 
         begin
           @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
