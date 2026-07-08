@@ -21,7 +21,7 @@ require 'graphql/batch'
 require_relative './fixtures'
 require_relative './star_wars_fixtures'
 
-def breadth(query, source, variables: {}, context: {}, tracers: [GraphQL::Breadth::Tracer.new])
+def breadth(query, source, variables: {}, context: {}, operation_name: nil, tracers: [GraphQL::Breadth::Tracer.new])
   GraphQL::Breadth::Executor.new(
     SCHEMA,
     GraphQL.parse(query),
@@ -30,6 +30,7 @@ def breadth(query, source, variables: {}, context: {}, tracers: [GraphQL::Breadt
     tracers: tracers,
     variables: variables,
     context: context,
+    operation_name: operation_name,
   ).result
 end
 

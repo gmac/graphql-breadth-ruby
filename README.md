@@ -39,6 +39,7 @@ The core execution algorithm is proven at scale in production. Subscriptions and
 executor = GraphQL::Breadth::Executor.new(
   MyGraphQLSchema,
   GraphQL.parse(document),
+  operation_name: "GetWidgets",
   root_object: { ... },
   variables: { ... },
   context: { ... },
@@ -82,7 +83,8 @@ This taxonomy provides the following API, which is useful while writing resolver
   - `path`: the selection path leading to the field, composed of namespaces with no list indices.
   - `key`: the namespace assigned by the field's selection alias or definition name.
   - `type`: the GraphQL return type of the field, may be abstract with non-null and list wrappers.
-  - `arguments`: a frozen hash of arguments provided to the selection. Argument keys are `:snake_case` symbols. Argument transformations are intentionally do not supported (i.e. the input "prepare" hook); argument formatting should be done holistically in the resolver.
+  - `objects`: the field's frozen object set. All fields share this set with their scope.
+  - `arguments`: a frozen hash of arguments provided to the selection. Argument keys are `:snake_case` symbols. Argument "prepare" hooks are intentionally not supported; argument formatting should be done holistically in the resolver.
   - `mutable_arguments`: a mutable clone of the arguments hash that can be modified.
   - `definition`: the associated GraphQL field definition. For schema reference only (avoid repurposing legacy implementation details).
   - `scope`: the parent execution scope that this field belongs to.
@@ -94,6 +96,7 @@ This taxonomy provides the following API, which is useful while writing resolver
   - `attribute?(<name>)`: checks an attribute without allocating storage.
 * **`ExecutionScope`**: represents a resolved object scope with a known concrete object type.
   - `path`: selection path leading to the scope, composed of namespaces with no list indices.
+  - `objects`: the scopes's frozen object set.
   - `parent`: the execution scope above this one.
   - `parent_field`: the execution field in the parent scope that opened this scope.
   - `parent_type`: the GraphQL object type of the scope. This is always a resolved object type, never an abstract interface or union.
@@ -107,7 +110,7 @@ This taxonomy provides the following API, which is useful while writing resolver
 
 ## Field resolvers
 
-For each field implementation, set up a `GraphQL::Breadth::FieldResolver` or use a [keyword helper](#resolver-keywords):
+For each field implementation, set up a `GraphQL::Breadth::FieldResolver`:
 
 ```ruby
 class MyFieldResolver < GraphQL::Breadth::FieldResolver
@@ -117,12 +120,7 @@ class MyFieldResolver < GraphQL::Breadth::FieldResolver
 end
 ```
 
-A field resolver receives:
-
-* `exec_field`: the execution field providing resources for the scope with [many useful properties](#execution-taxonomy), most importantly:
-   - `exec_field.objects`: the set of objects being resolved.
-   - `exec_field.arguments`: a hash of resolved arguments provided to the field.
-* `context`: the request context.
+A field resolver receives `exec_field` and `context`. The execution field provides `objects` and `arguments`, along with [many other useful properties](#execution-taxonomy).
 
 A resolver **must return a mapped set of results** for the field's objects, or invoke a [lazy resolver hook](#lazy-resolvers). To attach a field resolver to a field, use the `GraphQL::Breadth::HasBreadthResolver` field mixin:
 
@@ -140,6 +138,25 @@ class MyObject < BaseObject
     f.breadth_resolver = MyFieldResolver.new
   end
 end
+```
+
+Alternatively, you can manage field implementations using a resolver map:
+
+```ruby
+RESOLVER_MAP = {
+  "Query" => {
+    "widget" => WidgetResolver.new,
+  },
+  "Widget" => {
+    "id" => GraphQL::Cardinal::MethodResolver.new(:id),
+  }
+}.freeze
+
+executor = GraphQL::Breadth::Executor.new(
+  MyGraphQLSchema,
+  GraphQL.parse(document),
+  resolvers: RESOLVER_MAP,
+)
 ```
 
 ### Built-in resolvers
@@ -164,25 +181,6 @@ class MyFieldResolver < GraphQL::Breadth::FieldResolver
    end
 end
 ```
-
-### Attribute caches
-
-Field resolvers may build resources that can be shared with other fields across their scope. It's easy to share this sort of data using `attributes`. Both execution fields [and their scopes](#execution-taxonomy) support setting attributes:
-
-```ruby
-class MyFieldResolver < GraphQL::Breadth::FieldResolver
-   def resolve(exec_field, context)
-      # cache wrapped objects on the parent scope...
-      wrapped_objects = exec_field.scope.attributes[:wrapped_objects] ||= begin
-        exec_field.objects.map { |obj| MyWrapper.new(obj) }
-      end
-
-      wrapped_objects.map(&:wrapper_method)
-   end
-end
-```
-
-When reading attributes, prefer using `element.attribute(key)` to avoid allocating unnecessary storage.
 
 ### Error handling
 
@@ -221,6 +219,25 @@ class MyFieldResolver < GraphQL::Breadth::FieldResolver
    end
 end
 ```
+
+### Resolver caches
+
+Field resolvers may build and cache resources to be shared with other fields across their scope using `attributes`. Both execution fields and their scopes support setting attributes:
+
+```ruby
+class MyFieldResolver < GraphQL::Breadth::FieldResolver
+   def resolve(exec_field, context)
+      # cache wrapped objects on the parent scope...
+      wrapped_objects = exec_field.scope.attributes[:wrapped_objects] ||= begin
+        exec_field.objects.map { |obj| MyWrapper.new(obj) }
+      end
+
+      wrapped_objects.map(&:wrapper_method)
+   end
+end
+```
+
+When reading attributes, prefer using `element.attribute(key)` to avoid allocating unnecessary storage.
 
 ## Lazy resolvers
 
@@ -388,7 +405,7 @@ end
 
 ### Loader concurrency
 
-Lazy loaders may engage Ruby's fiber-based concurrency to asynchronously queue scheduler-compatible I/O, such as `async-http` requests (CPU-bound work and thread-blocking clients cannot be parallelized). Running the scheduler is not free, so loaders operate synchronously by default and must manually opt into async workflows when built to leverage them.
+Lazy loaders may engage Ruby's fiber-based concurrency to asynchronously queue scheduler-compatible I/O, such as `async-http` requests (CPU-bound work and thread-blocking clients cannot be parallelized). Running the Ruby scheduler is not free, so loaders must manually opt into async workflows when designed to leverage them.
 
 #### Install
 
@@ -464,7 +481,11 @@ class RemoteInventoryLoader < GraphQL::Breadth::LazyLoader
 end
 ```
 
-These fan-out instance methods share resource budgeting with their loader class by default. They can also specify their own `resource:`, `limit:`, and/or `timeout:` arguments to manage separate budgets from their loader class.
+These fan-out instance methods share resource budgeting with their loader class by default. They can also specify their own `resource:`, `limit:`, and/or `timeout:` arguments to manage separate budgets from their loader class:
+
+```ruby
+async_map(keys, resource: :sprockets, limit: 3) { |key| client.fetch_inventory(key) }
+```
 
 ## Query planning
 
@@ -659,6 +680,17 @@ class Language < GraphQL::Schema::Directive
 
   self.breadth_resolver = LanguageDirectiveResolver.new
 end
+```
+
+You can also install directive resolvers via a resolver map:
+
+```ruby
+RESOLVER_MAP = {
+  "@language" => LanguageDirectiveResolver.new,
+  "Query" => {
+    "widgets" => WidgetsFieldResolver.new,
+  },
+}
 ```
 
 ### Wrapping directives
