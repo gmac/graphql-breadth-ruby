@@ -148,7 +148,7 @@ RESOLVER_MAP = {
     "widget" => WidgetResolver.new,
   },
   "Widget" => {
-    "id" => GraphQL::Cardinal::MethodResolver.new(:id),
+    "id" => GraphQL::Breadth::MethodResolver.new(:id),
   }
 }.freeze
 
