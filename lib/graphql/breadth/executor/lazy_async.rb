@@ -6,6 +6,32 @@ module GraphQL
     class Executor
       # @requires_ancestor: Executor
       module LazyAsync
+        #: (
+        #|   ::Async::Barrier | ::Async::Semaphore,
+        #|   ?owner: ::Async::Barrier?,
+        #|   ?throttle: async_throttle?,
+        #|   ?timeout: Numeric?,
+        #| ) { (::Async::Task) -> untyped } -> ::Async::Task
+        def self.fork(parent, owner: nil, throttle: nil, timeout: nil, &block)
+          handler = if timeout
+            -> (task) { task.with_timeout(timeout, ::Async::TimeoutError) { block.call(task) } }
+          else
+            block
+          end
+
+          if throttle && owner
+            throttle.async(parent: owner) do |throttle_task|
+              parent.async(parent: throttle_task, &handler).wait
+            end
+          elsif throttle
+            throttle.async(parent: parent, &handler)
+          elsif owner
+            parent.async(parent: owner, &handler)
+          else
+            parent.async(&handler)
+          end
+        end
+
         class ExecutorContext
           #: Executor
           attr_reader :executor
@@ -63,19 +89,20 @@ module GraphQL
             @parent_semaphore = nil
           end
 
-          #: (?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ -> untyped } -> Future
-          def async(resource: nil, limit: nil, timeout: nil, &block)
+          #: (?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?, ?throttle: async_throttle?) ?{ -> untyped } -> Future
+          def async(resource: nil, limit: nil, timeout: nil, throttle: nil, &block)
             Kernel.raise ArgumentError, "LazyLoader#async requires a block" unless block
 
             settings = @loader.async_settings
             resource = settings.resource if resource.nil?
             limit = settings.limit if limit.nil?
             timeout = settings.timeout if timeout.nil?
+            throttle = settings.throttle if throttle.nil?
 
             Kernel.raise ArgumentError, "Lazy async limit must be positive" unless limit.nil? || limit > 0
             Kernel.raise ArgumentError, "Lazy async timeout must be positive" unless timeout.nil? || timeout > 0
 
-            # child fan-out shares the parent resource budget, so release the parent slot before waiting on child slots.
+            # Child fan-out shares the parent resource budget, so release the parent slot before waiting on child slots.
             release_parent_permit if @parent_semaphore && @loader.async_settings.resource == resource
 
             parent = if limit
@@ -85,13 +112,10 @@ module GraphQL
               @barrier
             end
 
-            task = parent.async(parent: @barrier) do |async_task|
+            owner = @barrier if limit
+            task = LazyAsync.fork(parent, owner: owner, throttle: throttle, timeout: timeout) do
               begin
-                if timeout
-                  async_task.with_timeout(timeout, ::Async::TimeoutError, &block)
-                else
-                  block.call
-                end
+                block.call
               rescue StandardError => e
                 @async_context.executor.handle_or_reraise(e)
               end
@@ -101,13 +125,13 @@ module GraphQL
             @futures.last
           end
 
-          #: [T, U] (Enumerable[T], ?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ (T) -> U } -> Array[U]
-          def async_map(collection, resource: nil, limit: nil, timeout: nil, &block)
+          #: [T, U] (Enumerable[T], ?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?, ?throttle: async_throttle?) ?{ (T) -> U } -> Array[U]
+          def async_map(collection, resource: nil, limit: nil, timeout: nil, throttle: nil, &block)
             Kernel.raise ArgumentError, "LazyLoader#async_map requires a block" unless block
 
             completed = false
             futures = collection.map do |item|
-              async(resource: resource, limit: limit, timeout: timeout) { block.call(item) }
+              async(resource: resource, limit: limit, timeout: timeout, throttle: throttle) { block.call(item) }
             end
 
             results = futures.map(&:wait)
@@ -224,19 +248,14 @@ module GraphQL
         def schedule_async_lazy_batch(async_context, batch)
           async_context.active_loaders.add(batch.loader)
 
-          async_context.barrier.async do |async_task|
-            settings = batch.loader.async_settings
+          settings = batch.loader.async_settings
+
+          LazyAsync.fork(async_context.barrier, throttle: settings.throttle, timeout: settings.timeout) do |async_task|
             loader_context = LoaderContext.new(batch.loader, async_context, async_task)
 
             begin
               begin
-                if settings.timeout
-                  async_task.with_timeout(settings.timeout) do
-                    loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
-                  end
-                else
-                  loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
-                end
+                loader_context.run { execute_lazy_batch(batch, async_context: loader_context) }
               rescue StandardError => e
                 apply_lazy_error(batch, handle_or_reraise(e))
               end

@@ -53,6 +53,7 @@ module GraphQL
     #: type graphql_result = Hash[String, untyped]
     #: type variables_hash = Hash[String, untyped]
     #: type selection_node = GraphQL::Language::Nodes::Field | GraphQL::Language::Nodes::InlineFragment | GraphQL::Language::Nodes::FragmentSpread
+    #: type async_throttle = ::Async::Limiter::Generic
   end
 end
 

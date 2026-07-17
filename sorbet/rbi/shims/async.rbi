@@ -1,6 +1,15 @@
 # typed: true
 
 module Async
+  module Limiter
+    class Generic
+      def async(parent: T.unsafe(nil), **options, &block); end
+    end
+
+    class Limited < Generic; end
+    class Queued < Generic; end
+  end
+
   class TimeoutError < StandardError; end
 
   class Barrier
