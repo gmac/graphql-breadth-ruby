@@ -441,7 +441,8 @@ All concurrency settings are optional:
 
 * `resource: Symbol`, coordinates limits across related loaders hitting the same upstream resource. Defaults to a unique resource identity per loader class.
 * `limit: Integer`, number of concurrent operations allowed while hitting the resource. Defaults to 8.
-* `timeout: Integer`, number of seconds to wait on load operations before timing out. Defaults to no limit.
+* `timeout: Integer`, number of seconds to wait on load operations before timing out. Defaults to none.
+* `throttle`, an [async-limiter](https://github.com/socketry/async-limiter) that throttles rate. Defaults to none.
 
 #### Async fan-out
 

@@ -302,6 +302,40 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     end
   end
 
+  class TestAsyncThrottle
+    attr_accessor :fork_count
+
+    def initialize
+      @fork_count = 0
+    end
+
+    def async(parent:, &block)
+      @fork_count += 1
+      parent.async(&block)
+    end
+  end
+
+  class ProvidedThrottleFanoutLoader < GraphQL::Breadth::LazyLoader
+    THROTTLE = TestAsyncThrottle.new
+
+    async limit: 1, throttle: THROTTLE
+
+    def map?
+      true
+    end
+
+    def perform_map(keys, _ctx)
+      async_map(keys) do |key|
+        label = [:provided_throttle, key]
+        AsyncFlowTracker.enter(label)
+        sleep(key == "Apple" ? 0.01 : 0.001)
+        "#{key}-provided-throttle"
+      ensure
+        AsyncFlowTracker.leave(label)
+      end
+    end
+  end
+
   class ConflictingLimitOneLoader < GraphQL::Breadth::LazyLoader
     async limit: 1, resource: :conflicting_async_resource
 
@@ -733,6 +767,7 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     FanoutMapLoader.reset_tracking!
     SharedResourceTracker.reset_tracking!
     AsyncFlowTracker.reset_tracking!
+    ProvidedThrottleFanoutLoader::THROTTLE.fork_count = 0
     AbortedPendingLoader.reset_tracking!
   end
 
@@ -1204,6 +1239,43 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
       [:finish, [:unlimited_fanout, "Apple"]],
     ], AsyncFlowTracker.events
     assert_equal 2, AsyncFlowTracker.max_active
+  end
+
+  def test_async_map_uses_a_loader_provided_throttle_for_parent_and_child_forks
+    document = GraphQL.parse(%|{
+      widgets {
+        first
+      }
+    }|)
+
+    source = {
+      "widgets" => [
+        { "first" => "Apple" },
+        { "first" => "Banana" },
+      ],
+    }
+
+    resolvers = LOADER_RESOLVERS.merge(
+      "Widget" => LOADER_RESOLVERS["Widget"].merge(
+        "first" => LoaderResolver.new(loader_class: ProvidedThrottleFanoutLoader, key: "first"),
+      ),
+    )
+
+    expected = {
+      "data" => {
+        "widgets" => [
+          { "first" => "Apple-provided-throttle" },
+          { "first" => "Banana-provided-throttle" },
+        ],
+      },
+    }
+
+    executor = GraphQL::Breadth::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
+    assert_equal expected, Timeout.timeout(1) { executor.result }
+    assert_equal 1, ProvidedThrottleFanoutLoader.async_settings.limit
+    assert_same ProvidedThrottleFanoutLoader::THROTTLE, ProvidedThrottleFanoutLoader.async_settings.throttle
+    assert_equal 3, ProvidedThrottleFanoutLoader::THROTTLE.fork_count
+    assert_equal 1, AsyncFlowTracker.max_active
   end
 
   def test_async_scheduler_waits_for_requeued_work_targeting_active_loader

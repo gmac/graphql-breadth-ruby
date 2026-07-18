@@ -5,7 +5,7 @@ module GraphQL
   module Breadth
     #: [ContextType < GraphQL::Query::Context]
     class LazyLoader
-      AsyncSettings = Data.define(:enabled, :limit, :resource, :timeout) do
+      AsyncSettings = Data.define(:enabled, :limit, :resource, :timeout, :throttle) do
         alias_method :enabled?, :enabled
       end
 
@@ -70,11 +70,12 @@ module GraphQL
         limit: nil,
         resource: nil,
         timeout: nil,
+        throttle: nil,
       ).freeze
 
       class << self
-        #: (?limit: Integer?, ?resource: Symbol?, ?timeout: Numeric?) -> void
-        def async(limit: 8, resource: nil, timeout: nil)
+        #: (?limit: Integer?, ?resource: Symbol?, ?timeout: Numeric?, ?throttle: async_throttle?) -> void
+        def async(limit: 8, resource: nil, timeout: nil, throttle: nil)
           unless GraphQL::Breadth.async_enabled?
             Kernel.raise ImplementationError, "Async lazy loaders require `GraphQL::Breadth.enable_async!` during initialization."
           end
@@ -87,6 +88,7 @@ module GraphQL
             limit: limit,
             resource: resource || name&.to_sym || :"lazy_loader_#{object_id}",
             timeout: timeout,
+            throttle: throttle,
           ).freeze
         end
 
@@ -133,22 +135,22 @@ module GraphQL
         self.class.async_settings
       end
 
-      #: (?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ -> untyped } -> Executor::LazyAsync::Future
-      def async(resource: nil, limit: nil, timeout: nil, &block)
+      #: (?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?, ?throttle: async_throttle?) ?{ -> untyped } -> Executor::LazyAsync::Future
+      def async(resource: nil, limit: nil, timeout: nil, throttle: nil, &block)
         unless @async_context
           raise ImplementationError, "LazyLoader#async requires the loader class to opt into async features via `async(...)`."
         end
 
-        @async_context.async(resource: resource, limit: limit, timeout: timeout, &block)
+        @async_context.async(resource: resource, limit: limit, timeout: timeout, throttle: throttle, &block)
       end
 
-      #: [T, U] (Enumerable[T], ?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?) ?{ (T) -> U } -> Array[U]
-      def async_map(collection, resource: nil, limit: nil, timeout: nil, &block)
+      #: [T, U] (Enumerable[T], ?resource: Symbol?, ?limit: Integer?, ?timeout: Numeric?, ?throttle: async_throttle?) ?{ (T) -> U } -> Array[U]
+      def async_map(collection, resource: nil, limit: nil, timeout: nil, throttle: nil, &block)
         unless @async_context
           raise ImplementationError, "LazyLoader#async_map requires the loader class to opt into async features via `async(...)`."
         end
 
-        @async_context.async_map(collection, resource: resource, limit: limit, timeout: timeout, &block)
+        @async_context.async_map(collection, resource: resource, limit: limit, timeout: timeout, throttle: throttle, &block)
       end
 
       #: (Array[untyped], ContextType) -> void
