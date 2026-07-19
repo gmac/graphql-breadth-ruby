@@ -452,6 +452,53 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     )
   end
 
+  def test_incremental_result_separately_emits_nested_defers_on_the_same_object
+    result = build_executor(%|{
+      products(first: 1) {
+        nodes {
+          id
+          ... @defer(label: "Outer") {
+            title
+            ... @defer(label: "Inner") {
+              must
+            }
+          }
+        }
+      }
+    }|, source: one_product_source).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1" }],
+          },
+        },
+        "pending" => [
+          { "id" => "0", "path" => ["products", "nodes", 0], "label" => "Outer" },
+          { "id" => "1", "path" => ["products", "nodes", 0], "label" => "Inner" },
+        ],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [
+        {
+          "incremental" => [{ "data" => { "title" => "Banana" }, "id" => "0" }],
+          "completed" => [{ "id" => "0" }],
+          "hasNext" => true,
+        },
+        {
+          "incremental" => [{ "data" => { "must" => "yes" }, "id" => "1" }],
+          "completed" => [{ "id" => "1" }],
+          "hasNext" => false,
+        },
+      ],
+      result.subsequent_results.to_a,
+    )
+  end
+
   def test_incremental_result_defers_top_level_fragment
     result = build_executor(%|{
       ... @defer(label: "Top") {
@@ -557,14 +604,18 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       result.initial_result,
     )
     assert_equal(
-      [{
-        "incremental" => [
-          { "data" => { "id" => "gid://shopify/Product/1" }, "id" => "0" },
-          { "data" => { "title" => "Banana" }, "id" => "1" },
-        ],
-        "completed" => [{ "id" => "0" }, { "id" => "1" }],
-        "hasNext" => false,
-      }],
+      [
+        {
+          "incremental" => [{ "data" => { "id" => "gid://shopify/Product/1" }, "id" => "0" }],
+          "completed" => [{ "id" => "0" }],
+          "hasNext" => true,
+        },
+        {
+          "incremental" => [{ "data" => { "title" => "Banana" }, "id" => "1" }],
+          "completed" => [{ "id" => "1" }],
+          "hasNext" => false,
+        },
+      ],
       result.subsequent_results.to_a,
     )
   end
@@ -595,30 +646,37 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       result.initial_result,
     )
     assert_equal(
-      [{
-        "incremental" => [
-          {
+      [
+        {
+          "incremental" => [{
             "data" => {
               "products" => {
                 "nodes" => [{}],
               },
             },
             "id" => "0",
-          },
-          {
+          }],
+          "hasNext" => true,
+        },
+        {
+          "incremental" => [{
             "data" => { "id" => "gid://shopify/Product/1" },
             "id" => "0",
             "subPath" => ["products", "nodes", 0],
-          },
-          {
+          }],
+          "completed" => [{ "id" => "0" }],
+          "hasNext" => true,
+        },
+        {
+          "incremental" => [{
             "data" => { "title" => "Banana" },
             "id" => "1",
             "subPath" => ["products", "nodes", 0],
-          },
-        ],
-        "completed" => [{ "id" => "0" }, { "id" => "1" }],
-        "hasNext" => false,
-      }],
+          }],
+          "completed" => [{ "id" => "1" }],
+          "hasNext" => false,
+        },
+      ],
       result.subsequent_results.to_a,
     )
   end
@@ -691,14 +749,14 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       result.initial_result,
     )
     assert_equal(
-      [{
-        "pending" => [{
-          "id" => "1",
-          "path" => ["products", "nodes", 0, "variants", "nodes", 0],
-          "label" => "Inner",
-        }],
-        "incremental" => [
-          {
+      [
+        {
+          "pending" => [{
+            "id" => "1",
+            "path" => ["products", "nodes", 0, "variants", "nodes", 0],
+            "label" => "Inner",
+          }],
+          "incremental" => [{
             "data" => {
               "title" => "Banana",
               "variants" => {
@@ -706,15 +764,16 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
               },
             },
             "id" => "0",
-          },
-          { "data" => { "title" => "Small Banana" }, "id" => "1" },
-        ],
-        "completed" => [
-          { "id" => "0" },
-          { "id" => "1" },
-        ],
-        "hasNext" => false,
-      }],
+          }],
+          "completed" => [{ "id" => "0" }],
+          "hasNext" => true,
+        },
+        {
+          "incremental" => [{ "data" => { "title" => "Small Banana" }, "id" => "1" }],
+          "completed" => [{ "id" => "1" }],
+          "hasNext" => false,
+        },
+      ],
       result.subsequent_results.to_a,
     )
   end
@@ -908,7 +967,7 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     result.subsequent_results.to_a
 
     assert_equal(
-      [["Banana", "Apple", "Yellow", "Red"]],
+      [["Banana", "Apple"], ["Yellow", "Red"]],
       BatchTrackingLoader.perform_keys,
     )
   end

@@ -967,6 +967,9 @@ module GraphQL
         operation = @query.selected_operation
         return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
 
+        operation = @query.selected_operation
+        return build_result(errors: @query.static_errors.map(&:to_h)) unless operation
+
         begin
           @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
         rescue InputValidationErrorSet => input_error
@@ -1007,47 +1010,46 @@ module GraphQL
 
       #: (Enumerator::Yielder) -> void
       def execute_next_incremental_result(yielder)
-        pending_payloads = []
-        incremental_payloads = []
-        completed_deliveries = []
-        completed_errors_by_delivery = {}.compare_by_identity
-
         loop do
           ready_scopes = @incremental.ready_scopes
           break if ready_scopes.empty?
 
+          exec_scope = ready_scopes.first
+          pending_payloads = []
+          incremental_payloads = []
+          completed_deliveries = []
+          completed_errors_by_delivery = {}.compare_by_identity
+
           initial_error_count = @invalidated_results.size
-          run!(@planner.plan_scopes(ready_scopes))
+          run!(@planner.plan_scopes([exec_scope]))
           has_errors = @invalidated_results.size > initial_error_count
 
-          ready_scopes.each do |exec_scope|
-            deliveries = @incremental.deliveries_for(exec_scope)
-            deliveries.each do |index, path, deferred_deliveries|
-              data = exec_scope.results[index]
-              errors = EMPTY_ARRAY
-              if has_errors
-                data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
-              end
-
-              if data.nil? && !errors.empty?
-                deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
-              else
-                incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
-              end
-              completed_deliveries.concat(deferred_deliveries)
+          deliveries = @incremental.deliveries_for(exec_scope)
+          deliveries.each do |index, path, deferred_deliveries|
+            data = exec_scope.results[index]
+            errors = EMPTY_ARRAY
+            if has_errors
+              data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
             end
 
-            exec_scope.executed = true
-            pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
+            if data.nil? && !errors.empty?
+              deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
+            else
+              incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
+            end
+            completed_deliveries.concat(deferred_deliveries)
           end
-        end
 
-        completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
-        payload = { "hasNext" => false }
-        payload["pending"] = pending_payloads unless pending_payloads.empty?
-        payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
-        payload["completed"] = completed_payloads unless completed_payloads.empty?
-        yielder << payload
+          exec_scope.executed = true
+          pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
+
+          completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
+          payload = { "hasNext" => @incremental.has_next? }
+          payload["pending"] = pending_payloads unless pending_payloads.empty?
+          payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
+          payload["completed"] = completed_payloads unless completed_payloads.empty?
+          yielder << payload
+        end
       end
 
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result
