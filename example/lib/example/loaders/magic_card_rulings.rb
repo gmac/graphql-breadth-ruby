@@ -20,12 +20,18 @@ module Example
         true
       end
 
-      def perform_map(card_ids, _context)
-        async_map(card_ids) do |card_id|
+      def perform_map(card_ids, context)
+        rulings = async_map(card_ids) do |card_id|
           fetch_scryfall_json("/cards/#{card_id}/rulings")
             .fetch("data")
             .map { normalize_ruling(_1) }
         end
+
+        records = card_ids.zip(rulings).map do |card_id, card_rulings|
+          { "id" => card_id, "rulings" => card_rulings }
+        end
+        context.fetch(:card_store).write(model: "MagicCardRulings", records: records)
+        rulings
       end
 
       private

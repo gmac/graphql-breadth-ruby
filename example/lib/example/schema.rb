@@ -96,6 +96,8 @@ module Example
     end
 
     def executor(document, variables: {}, context: {}, root_object: card_store, operation_name: nil)
+      context = { card_store: root_object }.merge(context)
+
       GraphQL::Breadth::Executor.new(
         GRAPHQL_SCHEMA,
         document,

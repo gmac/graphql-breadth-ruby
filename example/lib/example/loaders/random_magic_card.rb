@@ -24,10 +24,11 @@ module Example
         true
       end
 
-      def perform_map(requests, _context)
-        async_map(requests) do
+      def perform_map(requests, context)
+        cards = requests.map do
           normalize_card(fetch_scryfall_json("/cards/random"))
         end
+        context.fetch(:card_store).write(model: "MagicCard", records: cards)
       end
     end
   end

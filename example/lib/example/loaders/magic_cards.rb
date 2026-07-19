@@ -20,8 +20,9 @@ module Example
         true
       end
 
-      def perform_map(keys, _context)
-        fetch_cards(keys)
+      def perform_map(keys, context)
+        cards = fetch_cards(keys)
+        context.fetch(:card_store).write(model: "MagicCard", records: cards)
       end
 
       private

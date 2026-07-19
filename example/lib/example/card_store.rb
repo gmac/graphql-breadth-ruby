@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "set"
+require "thread"
 
 module Example
   class CardStore
@@ -15,6 +16,8 @@ module Example
 
     def initialize
       @members = Set.new([INITIAL_CARD_IDS.sample])
+      @cache = {}
+      @cache_mutex = Mutex.new
     end
 
     def add(card_id)
@@ -31,6 +34,25 @@ module Example
 
     def card_ids
       members.to_a
+    end
+
+    def where(model:, ids:)
+      @cache_mutex.synchronize do
+        records = @cache[model.to_s] || {}.freeze
+        ids.filter_map { |id| records[id.to_s] }
+      end
+    end
+
+    def write(model:, records:)
+      @cache_mutex.synchronize do
+        model_cache = (@cache[model.to_s] ||= {})
+
+        records.each do |record|
+          model_cache[record.fetch("id").to_s] = record unless record.nil?
+        end
+      end
+
+      records
     end
   end
 end

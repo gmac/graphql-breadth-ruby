@@ -16,12 +16,17 @@ module Example
           event_bus.subscribe
         end
 
-        def resolve(exec_field, _context)
+        def resolve(exec_field, context)
+          store = context.fetch(:card_store)
           card_ids = exec_field.objects.map { card_id_for(_1) }
+          cached_records = store
+            .where(model: "MagicCard", ids: card_ids)
+            .each_with_object({}) { |r, m| m[r.fetch("id").to_s] = r }
 
           exec_field.lazy(
             loader_class: Example::Loaders::MagicCards,
             keys: card_ids,
+            eager_values: cached_records,
           )
         end
 

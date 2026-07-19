@@ -14,7 +14,8 @@ module Example
             keys: [Object.new],
           ).then do |card|
             card_id = card.fetch("id")
-            exec_field.objects.first.add(card_id)
+            store = exec_field.objects.first
+            store.add(card_id)
             context[:event_bus]&.publish(card_id: card_id)
             exec_field.resolve_all(card)
           end

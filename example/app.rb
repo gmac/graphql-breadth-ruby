@@ -68,20 +68,17 @@ module Example
         },
       )
 
-      unless executor.query.selected_operation
+      if executor.query.selected_operation.nil?
         return json_response({ "errors" => executor.query.static_errors.map(&:to_h) }, status: 400)
-      end
 
-      if executor.subscription?
+      elsif executor.subscription?
         return subscription_response(executor, request)
-      end
 
-      if accepts?(request, "text/event-stream")
+      elsif accepts?(request, "text/event-stream")
         incremental = executor.incremental_result
         return sse_response(each_incremental_payload(incremental))
-      end
 
-      if accepts?(request, "multipart/mixed")
+      elsif accepts?(request, "multipart/mixed")
         incremental = executor.incremental_result
         return multipart_response(each_incremental_payload(incremental))
       end
@@ -92,9 +89,9 @@ module Example
     def subscription_response(executor, request)
       stream = executor.subscribe
 
-      return json_response(stream, status: 400) if stream.is_a?(Hash)
-
-      if accepts?(request, "multipart/mixed")
+      if stream.is_a?(Hash)
+        json_response(stream, status: 400)
+      elsif accepts?(request, "multipart/mixed")
         multipart_response(stream.each)
       else
         sse_response(stream.each)

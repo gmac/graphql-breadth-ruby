@@ -9,15 +9,19 @@ module Example
     module Query
       class MagicCards < GraphQL::Breadth::FieldResolver
         def resolve(exec_field, _context)
-          card_ids = exec_field.objects.first.card_ids
+          store = exec_field.objects.first
+          card_ids = store.card_ids
           return exec_field.resolve_all([]) if card_ids.empty?
+
+          cached_records = store
+            .where(model: "MagicCard", ids: card_ids)
+            .each_with_object({}) { |r, m| m[r.fetch("id").to_s] = r }
 
           exec_field.lazy(
             loader_class: Example::Loaders::MagicCards,
             keys: card_ids,
-          ).then do |results|
-            exec_field.resolve_all(results)
-          end
+            eager_values: cached_records,
+          ).then { exec_field.resolve_all(_1) }
         end
       end
     end

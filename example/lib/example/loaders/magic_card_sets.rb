@@ -20,8 +20,9 @@ module Example
         true
       end
 
-      def perform_map(set_ids, _context)
-        async_map(set_ids) { normalize_set(fetch_scryfall_json("/sets/#{_1}")) }
+      def perform_map(set_ids, context)
+        sets = async_map(set_ids) { normalize_set(fetch_scryfall_json("/sets/#{_1}")) }
+        context.fetch(:card_store).write(model: "MagicSet", records: sets)
       end
 
       private

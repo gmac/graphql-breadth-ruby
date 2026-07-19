@@ -256,6 +256,19 @@
     <script>
       const modeConfig = <%= JSON.generate(mode_config) %>;
       const inspectorConfig = modeConfig.inspector;
+      const activeStreamControllers = new Set();
+
+      function abortActiveStreams() {
+        for (const controller of activeStreamControllers) controller.abort();
+        activeStreamControllers.clear();
+      }
+
+      document.querySelector(".top-nav-links").addEventListener("click", (event) => {
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (event.target.closest?.("a.top-nav-link")) abortActiveStreams();
+      });
+      window.addEventListener("pagehide", abortActiveStreams);
 
       function ExamplePage() {
         const defaultVariables = React.useMemo(() => (
@@ -474,18 +487,19 @@
         const pendingById = new Map();
         let mergedResult = null;
         let hasRecordedInitialPayload = false;
-        const response = await fetch("/graphql", {
-          method: "post",
-          headers: {
-            ...normalizeHeaders(extraHeaders),
-            "Accept": "text/event-stream",
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(graphQLParams),
-          signal: controller.signal,
-        });
+        activeStreamControllers.add(controller);
 
         try {
+          const response = await fetch("/graphql", {
+            method: "post",
+            headers: {
+              ...normalizeHeaders(extraHeaders),
+              "Accept": "text/event-stream",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(graphQLParams),
+            signal: controller.signal,
+          });
           const contentType = response.headers.get("content-type") || "";
 
           if (!contentType.includes("text/event-stream")) {
@@ -505,9 +519,11 @@
 
           callbacks.onComplete?.();
         } catch (error) {
+          if (error.name === "AbortError") return;
           callbacks.onError?.(error);
           throw error;
         } finally {
+          activeStreamControllers.delete(controller);
           controller.abort();
         }
       }
