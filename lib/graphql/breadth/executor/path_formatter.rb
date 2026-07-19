@@ -34,6 +34,10 @@ module GraphQL
           current_scope = exec_scope #: Executor::ExecutionScope?
           breadth_index = index
           while current_scope
+            if current_scope.is_a?(Incremental::ExecutionScope)
+              return [*current_scope.object_path(breadth_index), *current_path]
+            end
+
             # index the scope unless it has already been done
             scope_indices = @indices_by_scope[current_scope]
             index_scope(current_scope, scope_indices) if scope_indices.empty?

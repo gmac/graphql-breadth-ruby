@@ -34,6 +34,9 @@ module GraphQL
         #: Array[Incremental::Selection]?
         attr_reader :incremental_selections
 
+        #: Incremental::StreamUsage?
+        attr_reader :stream_usage
+
         #: graphql_arguments
         attr_reader :arguments
 
@@ -54,8 +57,9 @@ module GraphQL
         #|   resolver: FieldResolver,
         #|   ?directives: Array[ExecutionDirective],
         #|   ?incremental_selections: Array[Incremental::Selection]?,
+        #|   ?stream_usage: Incremental::StreamUsage?,
         #| ) -> void
-        def initialize(key, nodes:, scope:, definition:, resolver:, directives: EMPTY_ARRAY, incremental_selections: nil)
+        def initialize(key, nodes:, scope:, definition:, resolver:, directives: EMPTY_ARRAY, incremental_selections: nil, stream_usage: nil)
           super()
           @key = key.freeze
           @scope = scope
@@ -69,6 +73,7 @@ module GraphQL
           @arguments, @argument_errors = executor.input.coerce_argument_values(@definition, @nodes.first)
           @mutable_arguments = nil
           @incremental_selections = incremental_selections
+          @stream_usage = stream_usage if stream_usage
           @path = nil
           @schema_path = nil
         end

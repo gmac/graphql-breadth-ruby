@@ -25,10 +25,9 @@ graphql-ruby dataloader: 1000 x 1 lazy scalar:      114.6 i/s - 21.56x  slower
 
 # Support
 
-The core execution algorithm is proven at scale in production. Subscriptions and Defer are experimental. Other limitations:
+The core execution algorithm is proven at scale in production. Subscriptions and incremental delivery (`@defer` and `@stream`) are experimental. Other limitations:
 
 * Currently no built-in validation or analysis, do it ahead of time.
-* Currently no stream.
 * Supports input validations, but intentionally omits input prepare hooks. Holistically prepare inputs in resolvers.
 
 # Usage
@@ -751,9 +750,9 @@ end
 
 This architecture makes cascading resolvers run repeatedly on every field in a subtree, rather than just once at the top of the owning field's subtree. This pattern is more granular and generally safer for isolation and parallelism, though has more resolver churn than a typical depth traversal so should be used accordingly.
 
-## Incremental results (`@defer`)
+## Incremental results (`@defer` and `@stream`)
 
-Query and mutation operations that may contain `@defer` should use `incremental_result`. This always returns a `GraphQL::Breadth::Incremental::Result`, even when the operation has no active deferred work:
+Query and mutation operations that may contain `@defer` or `@stream` should use `incremental_result`. This always returns a `GraphQL::Breadth::Incremental::Result`, even when the operation has no active incremental work:
 
 ```ruby
 result = executor.incremental_result
@@ -767,7 +766,22 @@ if result.incremental?
 end
 ```
 
-When no deferred work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. When deferred work is active, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later incremental payloads.
+When no incremental work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. Otherwise, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later payloads.
+
+`@stream` currently supports resolved Ruby arrays. The list resolver runs normally, the first `initialCount` entries are included in the initial response, and the remaining entries execute through an isolated breadth fork. Tail object fields and lazy loaders therefore remain batched:
+
+```graphql
+query StreamProducts {
+  products {
+    nodes @stream(initialCount: 3, label: "products") {
+      id
+      title
+    }
+  }
+}
+```
+
+Incremental execution is coordinated outside the normal query/mutation runner. Each deferred selection or streamed tail becomes a work item executed by an isolated fork that reuses the standard planner, field engine, authorization, lazy loaders, and error formatter. Ordinary `result` execution does not construct this subsystem and treats `@stream` as a normal complete list.
 
 The basic and incremental entry points are intentionally strict. Call either `result` OR `incremental_result` for a query or mutation executor depending on the request's support for incremental delivery (ex: multi-part and SSE requests); switching entry points after execution has started raises an implementation error.
 

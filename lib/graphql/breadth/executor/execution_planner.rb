@@ -55,6 +55,30 @@ module GraphQL
           operation.directives.map { |node| build_execution_directive(node, depth: 0) }
         end
 
+        #: (Array[GraphQL::Language::Nodes::Field], untyped) -> Incremental::StreamUsage?
+        def stream_usage_for(nodes, field_type)
+          return nil unless Util.unwrap_non_null(field_type).list?
+
+          node = nodes.first #: as !nil
+          directive = node.directives.find { _1.name == "stream" }
+          return nil unless directive
+
+          condition = directive.arguments.find { _1.name == "if" }
+          return nil if condition && argument_value(condition) == false
+
+          initial_count_arg = directive.arguments.find { _1.name == "initialCount" }
+          initial_count = initial_count_arg ? argument_value(initial_count_arg) : 0
+          unless initial_count.is_a?(Integer) && initial_count >= 0
+            raise ExecutionError, "@stream initialCount must be a non-negative integer"
+          end
+
+          label_arg = directive.arguments.find { _1.name == "label" }
+          label = label_arg ? argument_value(label_arg) : nil
+          label = nil unless label.is_a?(String)
+
+          Incremental::StreamUsage.new(label, initial_count:)
+        end
+
         #: (
         #|   GraphQL::Language::Nodes::OperationDefinition,
         #|   root_object: untyped,
@@ -265,9 +289,13 @@ module GraphQL
           @has_runtime_directives = false
 
           parent_usages = EMPTY_SET
-          selections_by_key = if exec_scope.is_a?(Incremental::DeferredExecutionScope)
-            parent_usages = exec_scope.defer_usages
-            exec_scope.field_selections
+          selections_by_key = if exec_scope.is_a?(Incremental::ExecutionScope)
+            if exec_scope.incremental_field_selections
+              parent_usages = exec_scope.defer_usages
+              exec_scope.incremental_field_selections
+            else
+              incremental_selections_grouped_by_key(exec_scope.parent_type, exec_scope.selections)
+            end
           elsif (parent_field = exec_scope.parent_field)
             map = Hash.new { |h, k| h[k] = [] }
             parent_incremental_selections = parent_field.incremental_selections #: as !nil
@@ -295,7 +323,16 @@ module GraphQL
           end
 
           base_selections.each do |key, incremental_selections|
-            exec_field = build_execution_field(key, incremental_selections.map(&:node), exec_scope, has_runtime_directives, incremental_selections:)
+            nodes = incremental_selections.map(&:node)
+            definition = @context.types.field(exec_scope.parent_type, nodes.first.name)
+            exec_field = build_execution_field(
+              key,
+              nodes,
+              exec_scope,
+              has_runtime_directives,
+              incremental_selections:,
+              stream_usage: stream_usage_for(nodes, definition.type),
+            )
             add_execution_field_branch(exec_field, ordered_fields)
           end
         end
@@ -327,8 +364,9 @@ module GraphQL
         #|   ExecutionScope exec_scope,
         #|   ?bool has_runtime_directives,
         #|   ?incremental_selections: Array[Incremental::Selection]?,
+        #|   ?stream_usage: Incremental::StreamUsage?,
         #| ) -> ExecutionField[untyped]
-        def build_execution_field(key, nodes, exec_scope, has_runtime_directives = false, incremental_selections: nil)
+        def build_execution_field(key, nodes, exec_scope, has_runtime_directives = false, incremental_selections: nil, stream_usage: nil)
           first_node = nodes.first #: as !nil
           node_name = first_node.name
 
@@ -351,7 +389,11 @@ module GraphQL
             raise NotImplementedError, "No field resolver for '#{exec_scope.parent_type.graphql_name}.#{definition.graphql_name}'"
           end
 
-          directives = exec_scope.parent_field&.directives || EMPTY_ARRAY
+          directives = if exec_scope.is_a?(Incremental::ExecutionScope)
+            exec_scope.inherited_directives
+          else
+            exec_scope.parent_field&.directives || EMPTY_ARRAY
+          end
           if has_runtime_directives
             nodes.each do |node|
               node.directives.each do |directive|
@@ -372,6 +414,7 @@ module GraphQL
             resolver: resolver,
             directives: directives,
             incremental_selections: incremental_selections,
+            stream_usage:,
           )
         end
 

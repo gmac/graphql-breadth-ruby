@@ -15,7 +15,7 @@ module Example
     attr_reader :members
 
     def initialize
-      @members = Set.new([INITIAL_CARD_IDS.sample])
+      @members = Set.new(INITIAL_CARD_IDS)
       @cache = {}
       @cache_mutex = Mutex.new
     end

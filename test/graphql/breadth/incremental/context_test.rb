@@ -2,27 +2,11 @@
 
 require "test_helper"
 
-class GraphQL::Breadth::Incremental::ContextTest < Minitest::Test
-  DeferredDelivery = GraphQL::Breadth::Incremental::DeferredDelivery
-  DeferredExecutionScope = GraphQL::Breadth::Incremental::DeferredExecutionScope
+class GraphQL::Breadth::Incremental::CoordinatorTest < Minitest::Test
+  DeferredWork = GraphQL::Breadth::Incremental::DeferredWork
   ExecutionScope = GraphQL::Breadth::Executor::ExecutionScope
-  IncrementalContext = GraphQL::Breadth::Incremental::Context
 
-  def test_completed_payloads_deduplicate_deliveries
-    context = IncrementalContext.new(nil, data: {})
-    delivery = DeferredDelivery.new(["hero"])
-
-    assert_equal(
-      [{ "id" => "0", "errors" => [{ "message" => "bad" }] }],
-      context.completed_payloads(
-        [delivery, delivery],
-        errors_by_delivery: { delivery => [{ "message" => "bad" }] },
-      ),
-    )
-    assert_equal [], context.completed_payloads([delivery])
-  end
-
-  def test_deferred_execution_scope_is_not_ready_when_base_scope_aborted
+  def test_deferred_work_is_not_ready_when_base_scope_aborted
     executor = GraphQL::Breadth::Executor.new(
       SCHEMA,
       GraphQL.parse("{ noResolver }"),
@@ -38,14 +22,14 @@ class GraphQL::Breadth::Incremental::ContextTest < Minitest::Test
     )
     base_scope.executed = true
 
-    deferred_scope = DeferredExecutionScope.new(
+    deferred_work = DeferredWork.new(
       base_scope: base_scope,
       field_selections: {},
       defer_usages: Set.new,
     )
 
-    assert deferred_scope.ready?
+    assert deferred_work.ready?
     base_scope.abort!
-    refute deferred_scope.ready?
+    refute deferred_work.ready?
   end
 end

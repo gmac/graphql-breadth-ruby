@@ -4,8 +4,8 @@
 module GraphQL
   module Breadth
     module Incremental
-      # Backwards-compatible name for the internal coordinator.
-      Context = Coordinator
+      class StreamDelivery < Delivery
+      end
     end
   end
 end

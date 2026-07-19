@@ -30,6 +30,18 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     end
   end
 
+  class RejectFirstForkObjectAuthorization < GraphQL::Breadth::Authorization
+    def authorize_objects_in_scope?(exec_scope, _context)
+      exec_scope.is_a?(GraphQL::Breadth::Incremental::ExecutionScope)
+    end
+
+    def unauthorized_object_indices(exec_scope, _context)
+      return {} unless exec_scope.is_a?(GraphQL::Breadth::Incremental::ExecutionScope)
+
+      { 0 => GraphQL::Breadth::ExecutionError.new("Stream item hidden") }
+    end
+  end
+
   SOURCE = {
     "products" => {
       "nodes" => [{
@@ -972,14 +984,374 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     )
   end
 
+  def test_incremental_result_streams_list_field
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) {
+          id
+          title
+        }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1", "title" => "Banana" }],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Product/2", "title" => "Apple" }],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_streams_with_default_initial_count
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream { id }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      {
+        "data" => { "products" => { "nodes" => [] } },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_includes_stream_label
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1, label: "ProductNodes") { id }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      [{ "id" => "0", "path" => ["products", "nodes"], "label" => "ProductNodes" }],
+      result.initial_result.fetch("pending"),
+    )
+  end
+
+  def test_incremental_result_does_not_stream_when_if_is_false
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 0, if: false) { id }
+      }
+    }|).incremental_result
+
+    expected = {
+      "data" => {
+        "products" => {
+          "nodes" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+        },
+      },
+    }
+    refute result.incremental?
+    assert_equal expected, result.initial_result
+  end
+
+  def test_incremental_result_does_not_announce_stream_without_a_tail
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 2) { id }
+      }
+    }|).incremental_result
+
+    refute result.incremental?
+    assert_equal 2, result.initial_result.dig("data", "products", "nodes").length
+  end
+
+  def test_incremental_result_streams_alias_with_variable_arguments
+    result = build_executor(
+      %|query($enabled: Boolean, $count: Int) {
+        products(first: 2) {
+          cards: nodes @stream(if: $enabled, initialCount: $count) { id }
+        }
+      }|,
+      variables: { "enabled" => true, "count" => 1 },
+    ).incremental_result
+
+    assert_equal [{ "id" => "0", "path" => ["products", "cards"] }], result.initial_result.fetch("pending")
+    assert_equal(
+      [{ "id" => "gid://shopify/Product/2" }],
+      result.subsequent_results.to_a.fetch(0).fetch("incremental").fetch(0).fetch("items"),
+    )
+  end
+
+  def test_stream_execution_batches_lazy_work_for_tail_items
+    resolvers = BREADTH_RESOLVERS.merge(
+      "Product" => BREADTH_RESOLVERS.fetch("Product").merge(
+        "title" => LazyHashResolver.new("title"),
+      ),
+    )
+    BatchTrackingLoader.perform_keys = []
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream { title }
+      }
+    }|, resolvers:).incremental_result
+    result.subsequent_results.to_a
+
+    assert_equal [["Banana", "Apple"]], BatchTrackingLoader.perform_keys
+  end
+
+  def test_stream_execution_batches_tail_work_across_parent_lists
+    source = Marshal.load(Marshal.dump(SOURCE))
+    source["products"]["nodes"][0]["variants"]["nodes"] = [
+      { "id" => "variant-1", "title" => "Small Banana" },
+      { "id" => "variant-2", "title" => "Large Banana" },
+    ]
+    source["products"]["nodes"][1]["variants"]["nodes"] = [
+      { "id" => "variant-3", "title" => "Small Apple" },
+      { "id" => "variant-4", "title" => "Large Apple" },
+    ]
+    resolvers = BREADTH_RESOLVERS.merge(
+      "Variant" => BREADTH_RESOLVERS.fetch("Variant").merge(
+        "title" => LazyHashResolver.new("title"),
+      ),
+    )
+    BatchTrackingLoader.perform_keys = []
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          variants(first: 2) {
+            nodes @stream(initialCount: 1) { title }
+          }
+        }
+      }
+    }|, source:, resolvers:).incremental_result
+
+    assert_equal(
+      [
+        { "id" => "0", "path" => ["products", "nodes", 0, "variants", "nodes"] },
+        { "id" => "1", "path" => ["products", "nodes", 1, "variants", "nodes"] },
+      ],
+      result.initial_result.fetch("pending"),
+    )
+    payload = result.subsequent_results.to_a.fetch(0)
+    assert_equal(
+      [
+        { "items" => [{ "title" => "Large Banana" }], "id" => "0" },
+        { "items" => [{ "title" => "Large Apple" }], "id" => "1" },
+      ],
+      payload.fetch("incremental"),
+    )
+    assert_equal(
+      [["Small Banana", "Small Apple"], ["Large Banana", "Large Apple"]],
+      BatchTrackingLoader.perform_keys,
+    )
+  end
+
+  def test_defer_inside_stream_registers_tail_deferred_work
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1, label: "Nodes") {
+          id
+          ... @defer(label: "Title") { title }
+        }
+      }
+    }|).incremental_result
+
+    payloads = result.subsequent_results.to_a
+    stream_payload = payloads.find { _1.fetch("incremental", []).any? { |entry| entry.key?("items") } }
+    tail_defer = payloads.find do |payload|
+      payload.fetch("incremental", []).any? { |entry| entry["data"] == { "title" => "Apple" } }
+    end
+
+    assert_equal [{ "id" => "gid://shopify/Product/2" }], stream_payload.fetch("incremental").first.fetch("items")
+    assert_equal({ "title" => "Apple" }, tail_defer.fetch("incremental").first.fetch("data"))
+    assert_equal false, payloads.last.fetch("hasNext")
+  end
+
+  def test_stream_inside_defer_runs_after_deferred_parent
+    result = build_executor(%|{
+      products(first: 2) {
+        ... @defer(label: "Nodes") {
+          nodes @stream(initialCount: 1, label: "Tail") { id }
+        }
+      }
+    }|).incremental_result
+
+    payloads = result.subsequent_results.to_a
+    outer = payloads.fetch(0)
+    tail = payloads.fetch(1)
+
+    assert_equal [{ "id" => "gid://shopify/Product/1" }], outer.fetch("incremental").first.dig("data", "nodes")
+    assert_equal [{ "id" => "gid://shopify/Product/2" }], tail.fetch("incremental").first.fetch("items")
+    assert_equal false, tail.fetch("hasNext")
+  end
+
+  def test_result_ignores_stream_and_returns_the_complete_list
+    executor = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 0) { id }
+      }
+    }|)
+    result = executor.result
+
+    assert_equal 2, result.dig("data", "products", "nodes").length
+    refute result.key?("pending")
+    refute result.key?("hasNext")
+    assert_nil executor.incremental
+  end
+
+  def test_incremental_result_streams_leaf_list_items
+    source = Marshal.load(Marshal.dump(SOURCE))
+    source["products"]["nodes"] = [source["products"]["nodes"].first]
+    source["products"]["nodes"][0]["tags"] = ["fruit", "yellow", "ripe"]
+
+    result = build_executor(%|{
+      products(first: 1) {
+        nodes {
+          tags @stream(initialCount: 1)
+        }
+      }
+    }|, source:).incremental_result
+
+    assert_equal ["fruit"], result.initial_result.dig("data", "products", "nodes", 0, "tags")
+    assert_equal(
+      [{
+        "incremental" => [{ "items" => ["yellow", "ripe"], "id" => "0" }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_formats_nullable_stream_item_errors
+    source = Marshal.load(Marshal.dump(SOURCE))
+    source["products"]["nodes"] = [source["products"]["nodes"].first]
+    source["products"]["nodes"][0]["tags"] = ["fruit", GraphQL::ExecutionError.new("No tag")]
+
+    result = build_executor(%|{
+      products(first: 1) {
+        nodes {
+          tags @stream(initialCount: 1)
+        }
+      }
+    }|, source:).incremental_result
+    incremental = result.subsequent_results.to_a.fetch(0).fetch("incremental").fetch(0)
+
+    assert_equal [nil], incremental.fetch("items")
+    assert_equal "No tag", incremental.fetch("errors").first.fetch("message")
+    assert_equal ["products", "nodes", 0, "tags", 1], incremental.fetch("errors").first.fetch("path")
+  end
+
+  def test_incremental_result_streams_abstract_list_items
+    source = {
+      "nodes" => [
+        { "__typename__" => "Product", "id" => "1", "title" => "Banana" },
+        { "__typename__" => "Product", "id" => "2", "title" => "Apple" },
+      ],
+    }
+
+    result = build_executor(%|{
+      nodes(ids: ["1", "2"]) @stream(initialCount: 1) {
+        id
+        ... on Product { title }
+      }
+    }|, source:).incremental_result
+
+    assert_equal(
+      [{ "id" => "1", "title" => "Banana" }],
+      result.initial_result.dig("data", "nodes"),
+    )
+    assert_equal(
+      [{ "id" => "2", "title" => "Apple" }],
+      result.subsequent_results.to_a.fetch(0).fetch("incremental").fetch(0).fetch("items"),
+    )
+  end
+
+  def test_incremental_result_terminates_stream_for_non_null_item_error
+    source = Marshal.load(Marshal.dump(SOURCE))
+    source["products"]["nodes"] = [source["products"]["nodes"].first]
+    source["products"]["nodes"][0]["requiredTags"] = ["fruit", nil]
+
+    result = build_executor(%|{
+      products(first: 1) {
+        nodes {
+          requiredTags @stream(initialCount: 1)
+        }
+      }
+    }|, source:).incremental_result
+    payload = result.subsequent_results.to_a.fetch(0)
+
+    refute payload.key?("incremental")
+    assert_equal ["products", "nodes", 0, "requiredTags", 1], payload.dig("completed", 0, "errors", 0, "path")
+    assert_equal false, payload.fetch("hasNext")
+  end
+
+  def test_stream_fork_preserves_paths_when_authorization_removes_an_item
+    source = {
+      "nodes" => [
+        { "__typename__" => "Product", "id" => "1" },
+        { "__typename__" => "Product", "id" => "2" },
+      ],
+    }
+    result = build_executor(
+      %|{ nodes(ids: ["1", "2"]) @stream { id } }|,
+      source:,
+      authorization: RejectFirstForkObjectAuthorization,
+    ).incremental_result
+    incremental = result.subsequent_results.to_a.fetch(0).fetch("incremental").fetch(0)
+
+    assert_equal [nil, { "id" => "2" }], incremental.fetch("items")
+    assert_equal ["nodes", 0], incremental.fetch("errors").first.fetch("path")
+  end
+
   private
 
-  def build_executor(document, source: SOURCE, resolvers: BREADTH_RESOLVERS)
+  def build_executor(
+    document,
+    source: SOURCE,
+    resolvers: BREADTH_RESOLVERS,
+    authorization: GraphQL::Breadth::Authorization,
+    variables: {}
+  )
     GraphQL::Breadth::Executor.new(
       SCHEMA,
       GraphQL.parse(document),
       resolvers: resolvers,
       root_object: source,
+      authorization:,
+      variables:,
     )
   end
 

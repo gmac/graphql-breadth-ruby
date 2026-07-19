@@ -15,6 +15,8 @@ SDL = <<~SCHEMA
   type Product implements Node & HasMetafields {
     id: ID!
     title: String
+    tags: [String]
+    requiredTags: [String!]
     maybe: String
     must: String!
     metafield(key: String!): Metafield
@@ -121,6 +123,8 @@ BREADTH_RESOLVERS = {
   "Product" => {
     "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
     "title" => GraphQL::Breadth::HashKeyResolver.new("title"),
+    "tags" => GraphQL::Breadth::HashKeyResolver.new("tags"),
+    "requiredTags" => GraphQL::Breadth::HashKeyResolver.new("requiredTags"),
     "maybe" => GraphQL::Breadth::HashKeyResolver.new("maybe"),
     "must" => GraphQL::Breadth::HashKeyResolver.new("must"),
     "variants" => GraphQL::Breadth::HashKeyResolver.new("variants"),
@@ -166,6 +170,8 @@ BREADTH_DEFERRED_RESOLVERS = {
   "Product" => {
     "id" => DeferredHashResolver.new("id"),
     "title" => DeferredHashResolver.new("title"),
+    "tags" => DeferredHashResolver.new("tags"),
+    "requiredTags" => DeferredHashResolver.new("requiredTags"),
     "maybe" => DeferredHashResolver.new("maybe"),
     "must" => DeferredHashResolver.new("must"),
     "variants" => DeferredHashResolver.new("variants"),

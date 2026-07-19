@@ -595,30 +595,36 @@
 
         const nextResult = clone(currentResult || {});
 
-        if (!Array.isArray(payload.incremental)) {
+        if (Array.isArray(payload.incremental)) {
+          for (const incremental of payload.incremental) {
+            const pending = pendingById.get(incremental.id);
+            const basePath = pending ? pending.path : incremental.path;
+            const path = Array.isArray(basePath)
+              ? basePath.concat(incremental.subPath || [])
+              : [];
+
+            if ("data" in incremental) {
+              nextResult.data = applyDataPatch(nextResult.data, path, incremental.data);
+            }
+
+            if ("items" in incremental) {
+              nextResult.data = applyItemsPatch(nextResult.data, path, incremental.items);
+            }
+
+            if (incremental.errors) {
+              nextResult.errors = (nextResult.errors || []).concat(clone(incremental.errors));
+            }
+          }
+        } else {
           if ("data" in payload) nextResult.data = clone(payload.data);
           if (payload.errors) nextResult.errors = clone(payload.errors);
-          return compactPayload(nextResult);
-        }
-
-        for (const incremental of payload.incremental) {
-          const pending = pendingById.get(incremental.id);
-          const basePath = pending ? pending.path : incremental.path;
-          const path = Array.isArray(basePath)
-            ? basePath.concat(incremental.subPath || [])
-            : [];
-
-          if ("data" in incremental) {
-            nextResult.data = applyDataPatch(nextResult.data, path, incremental.data);
-          }
-
-          if (incremental.errors) {
-            nextResult.errors = (nextResult.errors || []).concat(clone(incremental.errors));
-          }
         }
 
         if (Array.isArray(payload.completed)) {
           for (const completed of payload.completed) {
+            if (completed.errors) {
+              nextResult.errors = (nextResult.errors || []).concat(clone(completed.errors));
+            }
             pendingById.delete(completed.id);
           }
         }
@@ -645,6 +651,35 @@
 
         const finalSegment = path[path.length - 1];
         target[finalSegment] = mergeValues(target[finalSegment], patchData);
+        return nextData;
+      }
+
+      function applyItemsPatch(data, path, items) {
+        const nextData = clone(data || (typeof path[0] === "number" ? [] : {}));
+        const nextItems = clone(items);
+
+        if (!Array.isArray(path) || path.length === 0) {
+          return (Array.isArray(nextData) ? nextData : []).concat(nextItems);
+        }
+
+        let target = nextData;
+        for (let index = 0; index < path.length - 1; index += 1) {
+          const segment = path[index];
+          const nextSegment = path[index + 1];
+          if (target[segment] === null || typeof target[segment] !== "object") {
+            target[segment] = typeof nextSegment === "number" ? [] : {};
+          }
+          target = target[segment];
+        }
+
+        const finalSegment = path[path.length - 1];
+        if (typeof finalSegment === "number") {
+          if (!Array.isArray(target)) return nextData;
+          target.splice(finalSegment, 0, ...nextItems);
+        } else {
+          const currentItems = Array.isArray(target[finalSegment]) ? target[finalSegment] : [];
+          target[finalSegment] = currentItems.concat(nextItems);
+        }
         return nextData;
       }
 

@@ -14,6 +14,7 @@ The top nav switches between:
 
 - `/query` for normal JSON query and mutation requests.
 - `/defer` for `@defer` over SSE. GraphiQL's response pane shows the current merged result snapshot, while the "SSE Stream" panel shows the raw SSE timeline with receive timing.
+- `/stream` for `@stream` over SSE, with the first three cards in the initial result and remaining cards delivered incrementally.
 - `/subscriptions` for subscriptions over SSE. The "Card Events" panel fills in a live list of raw events, and the top-right "Add Card" button runs the `addAnotherCard` mutation to publish to open subscriptions.
 
 The stream routes start with GraphiQL's editor maximized so the operation is the main workspace while the right sidebar records each raw SSE payload as it arrives.
@@ -50,6 +51,15 @@ curl -N http://localhost:9292/graphql \\
   -H 'Accept: multipart/mixed' \\
   -H 'Content-Type: application/json' \\
   -d '{"query":"{ magicCards { id name ... @defer(label: \"rulings\") { rulings { date comment } } } }"}'
+```
+
+## Incremental `@stream` over SSE
+
+```sh
+curl -N http://localhost:9292/graphql \
+  -H 'Accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ magicCards @stream(initialCount: 3) { id name set { code name } rulings { date comment } } }"}'
 ```
 
 ## Subscription over SSE

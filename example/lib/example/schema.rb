@@ -9,6 +9,7 @@ module Example
   module Schema
     SDL = <<~GRAPHQL
       directive @defer(if: Boolean, label: String) on INLINE_FRAGMENT | FRAGMENT_SPREAD
+      directive @stream(if: Boolean, label: String, initialCount: Int = 0) on FIELD
 
       schema {
         query: Query

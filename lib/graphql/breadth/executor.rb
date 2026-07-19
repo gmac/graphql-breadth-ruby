@@ -47,7 +47,7 @@ module GraphQL
       #: ExecutionPlanner
       attr_reader :planner
 
-      #: Incremental::Context?
+      #: Incremental::Coordinator?
       attr_reader :incremental
 
       #: Hash[untyped, singleton(GraphQL::Schema::Object)]?
@@ -144,18 +144,8 @@ module GraphQL
         return @result if @result.is_a?(Incremental::Result)
         raise ImplementationError, "Cannot call incremental_result after result" if executed?
 
-        @incremental = Incremental::Context.new(self, data: @data)
-        initial_result = execute
-        subsequent_results = EMPTY_ARRAY
-        pending_deliveries = @incremental.prepare_pending
-
-        unless pending_deliveries.empty?
-          initial_result["pending"] = @incremental.pending_payloads(pending_deliveries)
-          initial_result["hasNext"] = true
-          subsequent_results = Enumerator.new { execute_next_incremental_result(_1) }
-        end
-
-        @result = Incremental::Result.new(initial_result: initial_result, subsequent_results: subsequent_results)
+        @incremental = Incremental::Coordinator.new(self, data: @data)
+        @result = @incremental.result(execute)
       end
 
       #: -> (SubscriptionResponseStream | graphql_result)
@@ -433,6 +423,9 @@ module GraphQL
         unless invalidated_indices.empty?
           parent_field = exec_scope.parent_field
           invalidated_indices.keys.sort.reverse_each do |index|
+            if exec_scope.is_a?(Incremental::ExecutionScope)
+              exec_scope.remove_entry_at(index)
+            end
             exec_scope.objects.delete_at(index)
             result = exec_scope.results.delete_at(index)
             error = invalidated_indices[index]
@@ -449,6 +442,7 @@ module GraphQL
 
         exec_scope.objects.freeze
         exec_scope.results.freeze
+        exec_scope.freeze_entry_paths! if exec_scope.is_a?(Incremental::ExecutionScope)
         exec_scope
       end
 
@@ -709,6 +703,10 @@ module GraphQL
           resolved_objects = exec_field.resolve_all(nil)
         end
 
+        if @incremental && exec_field.stream_usage
+          resolved_objects = @incremental.partition_stream(exec_field, resolved_objects)
+        end
+
         if return_type.kind.composite?
           # build results with child selections
           next_objects = []
@@ -845,6 +843,7 @@ module GraphQL
       #: (ExecutionField[untyped]) -> void
       def propagate_null!(exec_field)
         return if exec_field.scope.aborted? || !exec_field.propagates_null?
+        return if exec_field.scope.root.is_a?(Incremental::ExecutionScope)
 
         # Walk the tree to determine the highest contiguous non-null depth, and the highest list depth.
         # We can ONLY abort breadth resolvers when one of the following happens:
@@ -1005,50 +1004,6 @@ module GraphQL
         rescue StandardError => e
           handled_error = handle_or_reraise(e, exec_field: exec_field)
           build_result(errors: serialize_errors(handled_error, exec_field: exec_field))
-        end
-      end
-
-      #: (Enumerator::Yielder) -> void
-      def execute_next_incremental_result(yielder)
-        loop do
-          ready_scopes = @incremental.ready_scopes
-          break if ready_scopes.empty?
-
-          exec_scope = ready_scopes.first
-          pending_payloads = []
-          incremental_payloads = []
-          completed_deliveries = []
-          completed_errors_by_delivery = {}.compare_by_identity
-
-          initial_error_count = @invalidated_results.size
-          run!(@planner.plan_scopes([exec_scope]))
-          has_errors = @invalidated_results.size > initial_error_count
-
-          deliveries = @incremental.deliveries_for(exec_scope)
-          deliveries.each do |index, path, deferred_deliveries|
-            data = exec_scope.results[index]
-            errors = EMPTY_ARRAY
-            if has_errors
-              data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
-            end
-
-            if data.nil? && !errors.empty?
-              deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
-            else
-              incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
-            end
-            completed_deliveries.concat(deferred_deliveries)
-          end
-
-          exec_scope.executed = true
-          pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
-
-          completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
-          payload = { "hasNext" => @incremental.has_next? }
-          payload["pending"] = pending_payloads unless pending_payloads.empty?
-          payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
-          payload["completed"] = completed_payloads unless completed_payloads.empty?
-          yielder << payload
         end
       end
 
