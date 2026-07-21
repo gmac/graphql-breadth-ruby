@@ -53,6 +53,11 @@ module GraphQL
           raise NotImplementedError
         end
 
+        #: -> bool
+        def announceable?
+          ready?
+        end
+
         #: -> untyped
         def cohort_key
           self

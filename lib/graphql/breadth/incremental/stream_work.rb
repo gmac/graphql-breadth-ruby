@@ -14,41 +14,91 @@ module GraphQL
         #: untyped
         attr_reader :item_type
 
-        #: Array[untyped]
-        attr_reader :remaining_items
+        #: Stream::Session
+        attr_reader :session
 
         #: Integer
-        attr_reader :initial_index
+        attr_reader :position
 
         #: (
         #|   parent_field: Executor::ExecutionField[untyped],
         #|   delivery: StreamDelivery,
         #|   item_type: untyped,
-        #|   remaining_items: Array[untyped],
+        #|   session: Stream::Session,
+        #|   position: Integer,
         #|   initial_index: Integer,
         #| ) -> void
-        def initialize(parent_field:, delivery:, item_type:, remaining_items:, initial_index:)
+        def initialize(parent_field:, delivery:, item_type:, session:, position:, initial_index:)
           super()
           @parent_field = parent_field
           @delivery = delivery
           @item_type = item_type
-          @remaining_items = remaining_items
-          @initial_index = initial_index
+          @session = session
+          @position = position
+          @next_index = initial_index
+          @items = nil
           @entries = nil
+          @complete_after_batch = false
+          @source_error = nil
         end
 
         #: -> bool
         def ready?
-          @parent_field.scope.executed? && !@parent_field.scope.aborted?
+          !!(@items && !@items.empty?) && @parent_field.scope.executed? && !@parent_field.scope.aborted?
+        end
+
+        #: -> bool
+        def announceable?
+          !executed? && @parent_field.scope.executed? && !@parent_field.scope.aborted?
+        end
+
+        #: -> bool
+        def batch_pending?
+          !!@items
+        end
+
+        #: (Array[untyped], ?complete: bool) -> void
+        def load_batch(items, complete: false)
+          raise ImplementationError, "Cannot replace an unconsumed stream batch" if @items
+
+          @items = items
+          @entries = nil
+          @complete_after_batch = complete
+        end
+
+        #: -> void
+        def complete!
+          @executed = true
+        end
+
+        #: (StandardError) -> void
+        def fail!(error)
+          @source_error = error
+          complete!
+        end
+
+        #: -> StandardError?
+        def source_error
+          @source_error
+        end
+
+        #: -> void
+        def finish_batch!
+          @next_index += @items&.length || 0
+          @items = nil
+          @entries = nil
+          complete! if @complete_after_batch
+          @complete_after_batch = false
         end
 
         #: (Coordinator) -> Array[Entry]
         def entries(_coordinator)
-          @entries ||= @remaining_items.each_with_index.map do |object, offset|
+          items = @items || EMPTY_ARRAY
+          @entries ||= items.each_with_index.map do |object, offset|
             Entry.new(
               work: self,
               object:,
-              path: [*@delivery.path, @initial_index + offset],
+              path: [*@delivery.path, @next_index + offset],
               index: offset,
             )
           end.freeze

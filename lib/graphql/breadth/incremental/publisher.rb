@@ -36,8 +36,6 @@ module GraphQL
           result
         end
 
-        alias_method :incremental, :deferred
-
         #: (StreamDelivery, Array[untyped], ?errors: Array[error_hash]) -> graphql_result
         def stream(delivery, items, errors: EMPTY_ARRAY)
           result = {

@@ -20,6 +20,10 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     end
   end
 
+  class AsyncBatchTrackingLoader < BatchTrackingLoader
+    async(limit: 2, resource: :async_stream_source_acquisition)
+  end
+
   class LazyHashResolver < GraphQL::Breadth::FieldResolver
     def initialize(key)
       @key = key
@@ -27,6 +31,28 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
 
     def resolve(exec_field, _ctx)
       exec_field.lazy(loader_class: BatchTrackingLoader, keys: exec_field.objects.map { _1[@key] })
+    end
+  end
+
+  class StreamingNodesResolver < GraphQL::Breadth::FieldResolver
+    attr_reader :resolve_calls, :stream_calls, :initial_counts
+
+    def initialize(&stream_factory)
+      @stream_factory = stream_factory
+      @resolve_calls = 0
+      @stream_calls = 0
+      @initial_counts = []
+    end
+
+    def resolve(exec_field, _ctx)
+      @resolve_calls += 1
+      exec_field.map_objects { _1["nodes"] }
+    end
+
+    def stream(exec_field, _ctx, initial_count:)
+      @stream_calls += 1
+      @initial_counts << initial_count
+      @stream_factory.call(exec_field, initial_count)
     end
   end
 
@@ -1336,6 +1362,258 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     assert_equal ["nodes", 0], incremental.fetch("errors").first.fetch("path")
   end
 
+  def test_collective_stream_pulls_mapped_chunks_without_eagerly_exhausting_the_source
+    source = two_variants_source
+    pulls = 0
+    BatchTrackingLoader.perform_keys = []
+    resolver = StreamingNodesResolver.new do |exec_field, _initial_count|
+      Enumerator.new do |yielder|
+        pulls += 1
+        yielder << exec_field.objects.map { [_1.fetch("nodes").fetch(0)] }
+        pulls += 1
+        yielder << exec_field.objects.map do |connection|
+          GraphQL::Breadth::Incremental::Stream.chunk([connection.fetch("nodes").fetch(1)], complete: true)
+        end
+      end
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "VariantConnection" => BREADTH_RESOLVERS.fetch("VariantConnection").merge("nodes" => resolver),
+      "Variant" => BREADTH_RESOLVERS.fetch("Variant").merge("id" => LazyHashResolver.new("id")),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          variants(first: 2) {
+            nodes @stream(initialCount: 1) { id }
+          }
+        }
+      }
+    }|, source:, resolvers:).incremental_result
+
+    assert_equal 1, pulls
+    assert_equal 1, resolver.stream_calls
+    assert_equal 0, resolver.resolve_calls
+    assert_equal [1], resolver.initial_counts
+    assert_equal ["variant-1"], result.initial_result.dig("data", "products", "nodes", 0, "variants", "nodes").map { _1["id"] }
+    assert_equal ["variant-3"], result.initial_result.dig("data", "products", "nodes", 1, "variants", "nodes").map { _1["id"] }
+
+    payload = result.subsequent_results.next
+    assert_equal 2, pulls
+    assert_equal(
+      [
+        [{ "id" => "variant-2" }],
+        [{ "id" => "variant-4" }],
+      ],
+      payload.fetch("incremental").map { _1.fetch("items") },
+    )
+    assert_equal false, payload.fetch("hasNext")
+    assert_equal [["variant-1", "variant-3"], ["variant-2", "variant-4"]], BatchTrackingLoader.perform_keys
+  end
+
+  def test_positional_streams_pull_one_chunk_per_breadth_position_and_complete_later
+    source = two_variants_source
+    pulls = [0, 0]
+    resolver = StreamingNodesResolver.new do |exec_field, _initial_count|
+      exec_field.objects.each_with_index.map do |connection, position|
+        Enumerator.new do |yielder|
+          connection.fetch("nodes").each do |variant|
+            pulls[position] += 1
+            yielder << [variant]
+          end
+        end
+      end
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "VariantConnection" => BREADTH_RESOLVERS.fetch("VariantConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          variants(first: 2) {
+            nodes @stream(initialCount: 1) { id }
+          }
+        }
+      }
+    }|, source:, resolvers:).incremental_result
+
+    assert_equal [1, 1], pulls
+    items_payload = result.subsequent_results.next
+    assert_equal [2, 2], pulls
+    assert_equal true, items_payload.fetch("hasNext")
+    assert_equal [[{ "id" => "variant-2" }], [{ "id" => "variant-4" }]], items_payload.fetch("incremental").map { _1.fetch("items") }
+
+    completion_payload = result.subsequent_results.next
+    assert_equal false, completion_payload.fetch("hasNext")
+    assert_equal 2, completion_payload.fetch("completed").length
+    assert_equal [2, 2], pulls
+  end
+
+  def test_stream_source_can_be_acquired_through_a_lazy_loader
+    AsyncBatchTrackingLoader.perform_keys = []
+    source_tasks = []
+    resolver = StreamingNodesResolver.new do |exec_field, _initial_count|
+      exec_field.lazy(
+        loader_class: AsyncBatchTrackingLoader,
+        keys: exec_field.objects.map { _1.fetch("nodes") },
+      ).then do |nodes_by_position|
+        sources = nodes_by_position.map do |nodes|
+          Enumerator.new do |yielder|
+            nodes.each do |node|
+              source_tasks << Async::Task.current?
+              yielder << [node]
+            end
+          end
+        end
+
+        GraphQL::Breadth::Incremental::Stream.positional(
+          sources,
+          async: true,
+          limit: 2,
+          resource: :async_acquired_stream,
+        )
+      end
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "ProductConnection" => BREADTH_RESOLVERS.fetch("ProductConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) { id }
+      }
+    }|, resolvers:).incremental_result
+
+    assert_equal 1, AsyncBatchTrackingLoader.perform_keys.length
+    assert_equal ["gid://shopify/Product/1"], result.initial_result.dig("data", "products", "nodes").map { _1.fetch("id") }
+    payload = result.subsequent_results.next
+    assert_equal [{ "id" => "gid://shopify/Product/2" }], payload.fetch("incremental").first.fetch("items")
+    assert_equal 2, source_tasks.length
+    assert source_tasks.all?, source_tasks.inspect
+  end
+
+  def test_positional_streams_use_lazy_async_resource_limits
+    source = two_variants_source
+    active = 0
+    maximum_active = 0
+    lock = Mutex.new
+    resolver = StreamingNodesResolver.new do |exec_field, _initial_count|
+      sources = exec_field.objects.map do |connection|
+        Enumerator.new do |yielder|
+          lock.synchronize do
+            active += 1
+            maximum_active = [maximum_active, active].max
+          end
+          sleep 0.01
+          lock.synchronize { active -= 1 }
+          yielder << GraphQL::Breadth::Incremental::Stream.chunk(connection.fetch("nodes"), complete: true)
+        end
+      end
+
+      GraphQL::Breadth::Incremental::Stream.positional(
+        sources,
+        async: true,
+        limit: 2,
+        resource: :positional_variant_stream,
+      )
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "VariantConnection" => BREADTH_RESOLVERS.fetch("VariantConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          variants(first: 2) {
+            nodes @stream(initialCount: 1) { id }
+          }
+        }
+      }
+    }|, source:, resolvers:).incremental_result
+
+    assert_equal 2, maximum_active
+    assert_equal 1, result.initial_result.dig("data", "products", "nodes", 0, "variants", "nodes").length
+    payload = result.subsequent_results.next
+    assert_equal false, payload.fetch("hasNext")
+    assert_equal 2, payload.fetch("incremental").length
+  end
+
+  def test_stream_source_errors_complete_only_the_failed_position
+    source = two_variants_source
+    resolver = StreamingNodesResolver.new do |exec_field, _initial_count|
+      exec_field.objects.each_with_index.map do |connection, position|
+        Enumerator.new do |yielder|
+          yielder << [connection.fetch("nodes").fetch(0)]
+          if position.zero?
+            raise GraphQL::ExecutionError, "variant page failed"
+          end
+
+          yielder << GraphQL::Breadth::Incremental::Stream.chunk(
+            [connection.fetch("nodes").fetch(1)],
+            complete: true,
+          )
+        end
+      end
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "VariantConnection" => BREADTH_RESOLVERS.fetch("VariantConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          variants(first: 2) {
+            nodes @stream(initialCount: 1) { id }
+          }
+        }
+      }
+    }|, source:, resolvers:).incremental_result
+    payload = result.subsequent_results.next
+    failed_completion = payload.fetch("completed").find { _1.key?("errors") }
+
+    assert_equal "variant page failed", failed_completion.dig("errors", 0, "message")
+    assert_equal ["products", "nodes", 0, "variants", "nodes"], failed_completion.dig("errors", 0, "path")
+    assert_equal [{ "id" => "variant-4" }], payload.fetch("incremental").first.fetch("items")
+    assert_equal false, payload.fetch("hasNext")
+  end
+
+  def test_stream_falls_back_to_resolve_when_resolver_declines_streaming
+    resolver = StreamingNodesResolver.new { |_exec_field, _initial_count| nil }
+    resolvers = BREADTH_RESOLVERS.merge(
+      "ProductConnection" => BREADTH_RESOLVERS.fetch("ProductConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) { id }
+      }
+    }|, resolvers:).incremental_result
+
+    assert_equal 1, resolver.stream_calls
+    assert_equal 1, resolver.resolve_calls
+    assert_equal 1, result.initial_result.dig("data", "products", "nodes").length
+  end
+
+  def test_normal_result_does_not_call_the_stream_resolver
+    resolver = StreamingNodesResolver.new do |_exec_field, _initial_count|
+      raise "stream should not run"
+    end
+    resolvers = BREADTH_RESOLVERS.merge(
+      "ProductConnection" => BREADTH_RESOLVERS.fetch("ProductConnection").merge("nodes" => resolver),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) { id }
+      }
+    }|, resolvers:).result
+
+    assert_equal 0, resolver.stream_calls
+    assert_equal 1, resolver.resolve_calls
+    assert_equal 2, result.dig("data", "products", "nodes").length
+  end
+
   private
 
   def build_executor(
@@ -1361,5 +1639,18 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
         "nodes" => [SOURCE.fetch("products").fetch("nodes").first],
       },
     }
+  end
+
+  def two_variants_source
+    source = Marshal.load(Marshal.dump(SOURCE))
+    source["products"]["nodes"][0]["variants"]["nodes"] = [
+      { "id" => "variant-1", "title" => "Small Banana" },
+      { "id" => "variant-2", "title" => "Large Banana" },
+    ]
+    source["products"]["nodes"][1]["variants"]["nodes"] = [
+      { "id" => "variant-3", "title" => "Small Apple" },
+      { "id" => "variant-4", "title" => "Large Apple" },
+    ]
+    source
   end
 end

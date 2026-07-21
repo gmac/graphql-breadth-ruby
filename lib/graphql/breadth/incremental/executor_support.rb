@@ -35,6 +35,15 @@ module GraphQL
             loader_cache: (@loader_cache ||= {}),
           )
         end
+
+        #: [T, U] (Enumerable[T], LazyLoader::AsyncSettings) { (T) -> U } -> Array[U]
+        def execute_stream_sources(sources, settings, &block)
+          if settings.enabled?
+            execute_async_collection(sources, settings, &block)
+          else
+            sources.map(&block)
+          end
+        end
       end
     end
   end

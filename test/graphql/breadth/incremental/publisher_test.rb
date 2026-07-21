@@ -16,7 +16,7 @@ class GraphQL::Breadth::Incremental::PublisherTest < Minitest::Test
     assert_equal expected, publisher.pending([delivery])
   end
 
-  def test_incremental_payload_uses_deepest_matching_delivery
+  def test_deferred_payload_uses_deepest_matching_delivery
     publisher = Publisher.new
     parent = DeferredDelivery.new(["hero"], "HeroFields")
     child = DeferredDelivery.new(["hero", "friends", 0], "FriendFields", parent: parent)
@@ -29,7 +29,7 @@ class GraphQL::Breadth::Incremental::PublisherTest < Minitest::Test
         "id" => "1",
         "subPath" => ["profile"],
       },
-      publisher.incremental([parent, child], ["hero", "friends", 0, "profile"], { "name" => "Han" }),
+      publisher.deferred([parent, child], ["hero", "friends", 0, "profile"], { "name" => "Han" }),
     )
     assert_equal(
       {
@@ -37,7 +37,7 @@ class GraphQL::Breadth::Incremental::PublisherTest < Minitest::Test
         "id" => "0",
         "subPath" => ["appearsIn"],
       },
-      publisher.incremental([parent, child], ["hero", "appearsIn"], { "appearsIn" => ["NEWHOPE"] }),
+      publisher.deferred([parent, child], ["hero", "appearsIn"], { "appearsIn" => ["NEWHOPE"] }),
     )
   end
 

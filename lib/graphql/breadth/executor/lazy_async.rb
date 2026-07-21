@@ -6,6 +6,8 @@ module GraphQL
     class Executor
       # @requires_ancestor: Executor
       module LazyAsync
+        AsyncOwner = Data.define(:async_settings)
+
         #: (
         #|   ::Async::Barrier | ::Async::Semaphore,
         #|   ?owner: ::Async::Barrier?,
@@ -213,6 +215,18 @@ module GraphQL
         end
 
         private
+
+        #: [T, U] (Enumerable[T], LazyLoader::AsyncSettings) { (T) -> U } -> Array[U]
+        def execute_async_collection(collection, settings, &block)
+          Kernel.Sync do |task|
+            executor_context = ExecutorContext.new(self, task)
+            owner = AsyncOwner.new(async_settings: settings)
+            work_context = LoaderContext.new(owner, executor_context, task)
+            work_context.run do
+              work_context.async_map(collection, &block)
+            end
+          end
+        end
 
         #: (Array[LazyLoader::Batch], Array[LazyLoader::Batch]) -> void
         def execute_async_lazy_batches(sync_batches, async_batches)

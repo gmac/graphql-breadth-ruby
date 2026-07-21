@@ -60,25 +60,17 @@ module Example
         "label" => "Stream",
         "transport" => "sse",
         "defaultQuery" => <<~GRAPHQL,
-          query StreamedMagicCards {
-            magicCards @stream(initialCount: 3, label: "cards") {
-              id
+          query StreamedMagicSets {
+            magicSets @stream(initialCount: 2, label: "sets") {
+              code
               name
-              set {
-                code
-                name
-              }
-              rulings {
-                date
-                comment
-              }
             }
           }
         GRAPHQL
         "variables" => {},
         "inspector" => {
           "title" => "SSE Stream",
-          "empty" => "Run the operation to see streamed card payloads",
+          "empty" => "Run the operation to see streamed set payloads",
         },
       },
       "subscriptions" => {

@@ -40,6 +40,7 @@ module Example
 
       type Query {
         magicCards: [MagicCard!]!
+        magicSets: [MagicSet!]!
       }
 
       type Mutation {
@@ -55,6 +56,7 @@ module Example
 
     require_relative "card_store"
     require_relative "resolvers/query/magic_cards"
+    require_relative "resolvers/query/magic_sets"
     require_relative "resolvers/mutation/add_another_card"
     require_relative "resolvers/subscription/card_added"
     require_relative "resolvers/magic_card/set"
@@ -63,6 +65,7 @@ module Example
     RESOLVERS = {
       "Query" => {
         "magicCards" => Example::Resolvers::Query::MagicCards.new,
+        "magicSets" => Example::Resolvers::Query::MagicSets.new,
       },
       "Mutation" => {
         "addAnotherCard" => Example::Resolvers::Mutation::AddAnotherCard.new,

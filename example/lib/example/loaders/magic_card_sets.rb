@@ -21,11 +21,21 @@ module Example
       end
 
       def perform_map(set_ids, context)
-        sets = async_map(set_ids) { normalize_set(fetch_scryfall_json("/sets/#{_1}")) }
+        sets = async_map(set_ids) { fetch_set(_1) }
         context.fetch(:card_store).write(model: "MagicSet", records: sets)
       end
 
+      def perform_one(set_id, context)
+        set = fetch_set(set_id)
+        context.fetch(:card_store).write(model: "MagicSet", records: [set])
+        set
+      end
+
       private
+
+      def fetch_set(set_id)
+        normalize_set(fetch_scryfall_json("/sets/#{set_id}"))
+      end
 
       def normalize_set(set)
         {

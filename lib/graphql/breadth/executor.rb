@@ -420,12 +420,12 @@ module GraphQL
 
       #: (ExecutionScope, invalidated_indices) -> ExecutionScope
       def authorize_scope_objects(exec_scope, invalidated_indices)
+        is_incremental = exec_scope.is_a?(Incremental::ExecutionScope)
+
         unless invalidated_indices.empty?
           parent_field = exec_scope.parent_field
           invalidated_indices.keys.sort.reverse_each do |index|
-            if exec_scope.is_a?(Incremental::ExecutionScope)
-              exec_scope.remove_entry_at(index)
-            end
+            exec_scope.remove_entry_at(index) if is_incremental
             exec_scope.objects.delete_at(index)
             result = exec_scope.results.delete_at(index)
             error = invalidated_indices[index]
@@ -442,7 +442,7 @@ module GraphQL
 
         exec_scope.objects.freeze
         exec_scope.results.freeze
-        exec_scope.freeze_entry_paths! if exec_scope.is_a?(Incremental::ExecutionScope)
+        exec_scope.freeze_entry_paths! if is_incremental
         exec_scope
       end
 
@@ -641,10 +641,10 @@ module GraphQL
           if !pre_authorized
             exec_field.result = exec_field.resolve_all(FieldAuthorizationError.new(exec_field: exec_field))
           elsif exec_field.directives.empty?
-            exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+            exec_field.result = resolve_field(exec_field)
           else
             execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+              exec_field.result = resolve_field(exec_field)
             end
           end
         rescue StandardError => e
@@ -664,6 +664,21 @@ module GraphQL
         else
           build_field_result(exec_field, exec_field.result)
         end
+      end
+
+      #: (ExecutionField[untyped]) -> untyped
+      def resolve_field(exec_field)
+        if @incremental && (usage = exec_field.stream_usage)
+          streamed = exec_field.resolver.stream(exec_field, @context, initial_count: usage.initial_count)
+          if streamed.is_a?(ExecutionPromise)
+            return streamed.then do |source|
+              source ? Incremental::Stream.normalize(source) : exec_field.resolver.resolve(exec_field, @context)
+            end
+          end
+          return Incremental::Stream.normalize(streamed) if streamed
+        end
+
+        exec_field.resolver.resolve(exec_field, @context)
       end
 
       #: (ExecutionField[untyped]) -> void
@@ -694,13 +709,15 @@ module GraphQL
         field_type = exec_field.type
         return_type = field_type.unwrap
 
-        if resolved_objects.length != parent_objects.length
-          handle_or_reraise(ResultCountMismatchError.new(
-            exec_field: exec_field,
-            expected_count: parent_objects.length,
-            actual_count: resolved_objects.length,
-          ))
-          resolved_objects = exec_field.resolve_all(nil)
+        unless resolved_objects.is_a?(Incremental::Stream::Session)
+          if resolved_objects.length != parent_objects.length
+            handle_or_reraise(ResultCountMismatchError.new(
+              exec_field: exec_field,
+              expected_count: parent_objects.length,
+              actual_count: resolved_objects.length,
+            ))
+            resolved_objects = exec_field.resolve_all(nil)
+          end
         end
 
         if @incremental && exec_field.stream_usage

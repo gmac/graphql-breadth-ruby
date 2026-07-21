@@ -52,7 +52,6 @@ module GraphQL
             entries.each do |entry|
               @value_results[entry] = complete_value(first.item_type, entry.object, entry.path, first.parent_field)
             end
-            works.each(&:finish!)
             return self
           end
 
@@ -78,7 +77,6 @@ module GraphQL
           end
 
           run!(@planner.plan_scopes(@fork_scopes)) unless entries.empty?
-          works.each(&:finish!)
           self
         end
 

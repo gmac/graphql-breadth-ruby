@@ -768,7 +768,57 @@ end
 
 When no incremental work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. Otherwise, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later payloads.
 
-`@stream` currently supports resolved Ruby arrays. The list resolver runs normally, the first `initialCount` entries are included in the initial response, and the remaining entries execute through an isolated breadth fork. Tail object fields and lazy loaders therefore remain batched:
+`@stream` supports demand-driven sources as well as resolved Ruby arrays. A field resolver may implement a separate `stream` hook that is called only by `incremental_result` when the field has an active `@stream` directive. Ordinary `result` execution always calls `resolve` and never constructs a stream:
+
+```ruby
+class VariantNodesResolver < GraphQL::Breadth::FieldResolver
+  def resolve(exec_field, _context)
+    exec_field.map_objects { _1.load_all_variants }
+  end
+
+  def stream(exec_field, _context, initial_count:)
+    # One cursor per breadth position. Each cursor yields an Array containing
+    # the next useful chunk of raw records, then eventually stops.
+    exec_field.objects.map do |connection|
+      connection.variant_pages(page_size: [initial_count, 50].max)
+    end
+  end
+end
+```
+
+The stream hook may return either:
+
+* One `Enumerator` whose every yield is an outer array matching the field's breadth cardinality. Each position contains that cycle's array of records or `nil` when the position made no progress. This lets the resolver own batching across all parent objects.
+* An array matching the field's breadth cardinality, containing one `Enumerator` per active position. Each enumerator yields arrays of records independently. A `nil` positional source resolves that list position as GraphQL `null`.
+
+Use the explicit constructors when configuration or clarity is useful:
+
+```ruby
+GraphQL::Breadth::Incremental::Stream.collective(mapped_batches)
+
+GraphQL::Breadth::Incremental::Stream.positional(
+  per_connection_sources,
+  async: true,
+  resource: :variants_database,
+  limit: 8,
+  timeout: 2,
+  throttle: VARIANT_API_THROTTLE,
+)
+```
+
+Async positional pulls use the same fiber scheduler, resource semaphores, timeouts, and throttles as async lazy loaders. All eligible positions are advanced concurrently up to the configured limit, and the resulting records are then completed together through an isolated breadth fork. Source pulling and child execution are deliberately serialized so shared lazy-loader instances are never used concurrently.
+
+A source normally completes by ending enumeration. It may mark its final chunk explicitly to avoid a completion-only follow-up payload:
+
+```ruby
+yielder << GraphQL::Breadth::Incremental::Stream.chunk(records, complete: true)
+```
+
+The executor pulls only enough source chunks to satisfy `initialCount` for every active breadth position. Chunk overflow is buffered for subsequent delivery; later pulls happen only as `subsequent_results` is consumed. If `stream` returns `nil`, the executor calls `resolve` and adapts its eager arrays into incremental delivery. This fallback matches synchronous iterable behavior but does not claim to stream record acquisition.
+
+The stream hook may also return an `ExecutionPromise` from `exec_field.lazy`. This allows source discovery to use ordinary loaders before returning a collective or positional stream, including cases where discovery and streamed records have different resource limits or throttles.
+
+For either source form, each produced chunk is completed through the normal breadth engine. Child fields and lazy loaders remain batched across all records in that cohort:
 
 ```graphql
 query StreamProducts {
@@ -781,7 +831,7 @@ query StreamProducts {
 }
 ```
 
-Incremental execution is coordinated outside the normal query/mutation runner. Each deferred selection or streamed tail becomes a work item executed by an isolated fork that reuses the standard planner, field engine, authorization, lazy loaders, and error formatter. Ordinary `result` execution does not construct this subsystem and treats `@stream` as a normal complete list.
+Incremental execution is coordinated outside the normal query/mutation runner. Each deferred selection or produced stream cohort becomes work executed by an isolated fork that reuses the standard planner, field engine, authorization, lazy loaders, and error formatter. Ordinary `result` execution does not construct this subsystem and treats `@stream` as a normal complete list.
 
 The basic and incremental entry points are intentionally strict. Call either `result` OR `incremental_result` for a query or mutation executor depending on the request's support for incremental delivery (ex: multi-part and SSE requests); switching entry points after execution has started raises an implementation error.
 
